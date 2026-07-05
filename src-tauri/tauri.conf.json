@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "fhir-migration-studio",
-        "width": 800,
-        "height": 600
+        "title": "FHIR Migration Studio",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 600
       }
     ],
     "security": {

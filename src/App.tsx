@@ -1,27 +1,30 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { AppShell } from './components/layout/AppShell';
+import { Dashboard } from './pages/Dashboard';
+import { DirectMigration } from './pages/DirectMigration';
+import { ExportNDJSON } from './pages/ExportNDJSON';
+import { ImportNDJSON } from './pages/ImportNDJSON';
+import { ResourceMapping } from './pages/ResourceMapping';
+import { FHIRExplorer } from './pages/FHIRExplorer';
+import { Logs } from './pages/Logs';
+import { Settings } from './pages/Settings';
+import './index.css';
 
-function App() {
-  // const [greetMsg, setGreetMsg] = useState("");
-  // const [name, setName] = useState("");
-
-  // async function greet() {
-  //   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  //   setGreetMsg(await invoke("greet", { name }));
-  // }
-
+export default function App() {
   return (
-    <div className="flex h-screen items-center justify-center bg-slate-900 text-white">
-      <h1 className="text-4xl font-bold text-emerald-400 animate-pulse">
-        Tauri + Vite + React + Tailwind v4 is working!
-      </h1>
-      <div className="bg-blue-500 text-white p-4 rounded-lg">
-        Tesaja
-      </div>
-    </div>
+    <BrowserRouter>
+      <AppShell>
+        <Routes>
+          <Route path="/"          element={<Dashboard />} />
+          <Route path="/migrate"   element={<DirectMigration />} />
+          <Route path="/export"    element={<ExportNDJSON />} />
+          <Route path="/import"    element={<ImportNDJSON />} />
+          <Route path="/mapping"   element={<ResourceMapping />} />
+          <Route path="/explorer"  element={<FHIRExplorer />} />
+          <Route path="/logs"      element={<Logs />} />
+          <Route path="/settings"  element={<Settings />} />
+        </Routes>
+      </AppShell>
+    </BrowserRouter>
   );
 }
-
-export default App;
