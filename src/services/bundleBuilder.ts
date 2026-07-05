@@ -29,14 +29,29 @@ function generateUrn(): string {
  */
 export function buildTransactionBundle(resources: FhirResource[]): Bundle {
   const entries: BundleEntry[] = resources.map((resource) => {
-    // Strip server-assigned fields that should not carry over
-    const { id: _id, meta: _meta, ...rest } = resource;
+    // Strip the server-assigned resource id so the target assigns a new one.
+    const { id: _id, meta, ...rest } = resource;
     void _id;
-    void _meta;
+
+    // Preserve meta content (extension, profile, tag) but strip the
+    // server-assigned versionId and lastUpdated — those are meaningless on
+    // a different server. meta.extension is critical: it carries initiator
+    // Practitioner/Location references that must be migrated as-is (after
+    // the mapper has already rewritten the reference IDs).
+    let cleanedMeta: Omit<typeof meta, 'versionId' | 'lastUpdated'> | undefined;
+    if (meta) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { versionId: _v, lastUpdated: _l, ...metaRest } = meta;
+      // Only include meta if there is actually something left to include
+      cleanedMeta = Object.keys(metaRest).length > 0 ? metaRest : undefined;
+    }
 
     return {
       fullUrl: generateUrn(),
-      resource: rest as FhirResource,
+      resource: {
+        ...rest,
+        ...(cleanedMeta !== undefined ? { meta: cleanedMeta } : {}),
+      } as FhirResource,
       request: {
         method: 'POST',
         url: resource.resourceType,

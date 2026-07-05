@@ -76,11 +76,34 @@ export interface Narrative {
   div: string;
 }
 
+export interface Extension {
+  url: string;
+  valueString?: string;
+  valueBoolean?: boolean;
+  valueInteger?: number;
+  valueDecimal?: number;
+  valueUri?: string;
+  valueCode?: string;
+  valueDate?: string;
+  valueDateTime?: string;
+  valueCoding?: Coding;
+  valueCodeableConcept?: CodeableConcept;
+  valuePeriod?: Period;
+  valueReference?: Reference;
+  extension?: Extension[];
+}
+
 export interface Meta {
   versionId?: string;
   lastUpdated?: string;
   profile?: string[];
   tag?: Coding[];
+  /**
+   * meta.extension is used by some FHIR servers (e.g., eHealth) to store
+   * initiator Practitioner/Location references. Must be preserved during
+   * migration and must be walked by the reference mapper.
+   */
+  extension?: Extension[];
 }
 
 /** Base interface for all FHIR resources */
