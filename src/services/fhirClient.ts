@@ -46,13 +46,19 @@ function normalizeBaseUrl(url: string): string {
   return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
-async function handleResponse<T>(response: Response, context: string): Promise<T> {
+async function handleResponse<T>(response: Response, context: string, requestUrl?: string): Promise<T> {
   if (!response.ok) {
     const body = await response.text().catch(() => '');
+    const detail = [
+      requestUrl ? `URL: ${requestUrl}` : null,
+      body ? `Response body: ${body.slice(0, 1000)}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
     throw new FhirClientError(
       `${context} failed: HTTP ${response.status} ${response.statusText}`,
       response.status,
-      body,
+      detail || body,
     );
   }
   return response.json() as Promise<T>;
@@ -71,7 +77,7 @@ export const fhirClient = {
       method: 'GET',
       headers: buildHeaders(config),
     });
-    return handleResponse<T>(response, `GET ${path}`);
+    return handleResponse<T>(response, `GET ${path}`, url);
   },
 
   /**
@@ -85,7 +91,7 @@ export const fhirClient = {
       headers: buildHeaders(config),
       body: JSON.stringify(body),
     });
-    return handleResponse<T>(response, `POST ${path}`);
+    return handleResponse<T>(response, `POST ${path}`, url);
   },
 
   /**
@@ -96,11 +102,18 @@ export const fhirClient = {
     log({ level: 'info', message: `Testing connection to ${config.baseUrl}` });
     try {
       const cs = await fhirClient.get<CapabilityStatement>(config, '/metadata');
-      log({ level: 'success', message: `Connected to ${config.name} (FHIR ${cs.fhirVersion ?? 'unknown'})` });
+      log({
+        level: 'success',
+        message: `Connected to ${config.name} (FHIR ${cs.fhirVersion ?? 'unknown'})`,
+        detail: cs.software?.name
+          ? `Software: ${cs.software.name} ${cs.software.version ?? ''}`
+          : undefined,
+      });
       return cs;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log({ level: 'error', message: `Connection failed: ${msg}` });
+      const detail = err instanceof FhirClientError ? err.body : undefined;
+      log({ level: 'error', message: `Connection failed: ${msg}`, detail });
       throw err;
     }
   },
@@ -121,15 +134,47 @@ export const fhirClient = {
 
   /**
    * Fetch the next page of a search result using the Bundle's next link.
+   *
+   * FHIR servers return absolute URLs in the "next" relation link that use
+   * the server's own internal hostname/port. We discard that origin and use
+   * only the query string, re-attaching it to the user-configured base URL.
+   *
+   * Example next URL returned by server:
+   *   https://api.internal.example.com/fhir/?_getpages=abc&_getpagesoffset=50&_count=50
+   * Configured base URL:
+   *   http://localhost:9090/fhir
+   * Resolved URL used for request:
+   *   http://localhost:9090/fhir/?_getpages=abc&_getpagesoffset=50&_count=50
    */
   async nextPage(config: ServerConfig, nextUrl: string): Promise<Bundle> {
     const base = normalizeBaseUrl(config.baseUrl);
-    // nextUrl may be absolute or relative
-    const url = nextUrl.startsWith('http') ? nextUrl : `${base}${nextUrl}`;
+    let url: string;
+
+    if (nextUrl.startsWith('http')) {
+      // Extract only the query string from the server-returned absolute URL,
+      // then apply it to the user-configured base URL.
+      try {
+        const parsed = new URL(nextUrl);
+        url = `${base}/${parsed.search}`;
+      } catch {
+        // Fallback: use as-is if URL parsing fails
+        url = nextUrl;
+      }
+    } else {
+      // Relative URL — append directly
+      url = `${base}${nextUrl}`;
+    }
+
+    log({
+      level: 'info',
+      message: `Fetching next page`,
+      detail: `Original next link: ${nextUrl}\nResolved URL: ${url}`,
+    });
+
     const response = await fetch(url, {
       method: 'GET',
       headers: buildHeaders(config),
     });
-    return handleResponse<Bundle>(response, `GET next page`);
+    return handleResponse<Bundle>(response, `GET next page`, url);
   },
 };
