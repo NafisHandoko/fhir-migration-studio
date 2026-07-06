@@ -27,8 +27,8 @@ export class FhirClientError extends Error {
 
 function buildHeaders(config: ServerConfig): Record<string, string> {
   const headers: Record<string, string> = {
-    Accept: 'application/fhir+json',
-    'Content-Type': 'application/fhir+json',
+    Accept: '*/*',
+    'Content-Type': 'application/json',
   };
 
   if (config.auth?.token) {

@@ -17,6 +17,9 @@ export type FhirResourceType =
   | 'Procedure'
   | 'ProcedureRequest'
   | 'Coverage'
+  | 'AuditEvent'
+  | 'Consent'
+  | 'Questionnaire'
   | 'Practitioner'
   | 'Location'
   | 'HealthcareService';
@@ -34,7 +37,10 @@ export const MIGRATABLE_RESOURCE_TYPES: FhirResourceType[] = [
   'MedicationDispense',
   'Procedure',
   'ProcedureRequest',
-  'Coverage'
+  'Coverage',
+  'AuditEvent',
+  'Consent',
+  'Questionnaire',
 ];
 
 export const REFERENCE_RESOURCE_TYPES: FhirResourceType[] = [
