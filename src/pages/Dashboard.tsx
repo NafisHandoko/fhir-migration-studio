@@ -18,6 +18,8 @@ import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { useMigrationStore } from '../store/migrationStore';
 import { useLogStore } from '../store/logStore';
+import { useExportStore } from '../store/exportStore';
+import { useImportStore } from '../store/importStore';
 import { computeOverallProgress } from '../types/migration';
 import { MIGRATABLE_RESOURCE_TYPES } from '../types/fhir';
 import type { FhirResourceType } from '../types/fhir';
@@ -36,8 +38,24 @@ export function Dashboard() {
   const { current: job, history } = useMigrationStore();
   const { entries: logs } = useLogStore();
 
-  const activeJob = job?.status !== 'done' && job?.status !== 'idle' ? job : null;
+  const { running: exportRunning, progress: exportProgress, selected: exportSelected } = useExportStore();
+  const { uploadState: importState, fileName: importFileName } = useImportStore();
+  const importRunning = importState.status === 'uploading';
+
+  const activeJob = job?.status !== 'done' && job?.status !== 'idle' && job?.status !== 'error' && job?.status !== 'cancelled' ? job : null;
   const lastJob = history[0] ?? null;
+
+  const activeCount = (activeJob ? 1 : 0) + (exportRunning ? 1 : 0) + (importRunning ? 1 : 0);
+
+  let progressSub = 'No active operations';
+  if (activeJob) progressSub = 'Direct migration running';
+  else if (exportRunning) progressSub = 'NDJSON export running';
+  else if (importRunning) progressSub = 'NDJSON import running';
+
+  // Compute export percentage progress
+  const exportTotal = exportSelected.length;
+  const exportDone = Object.values(exportProgress).filter((p) => p?.status === 'done' || p?.status === 'error').length;
+  const exportPct = exportTotal > 0 ? Math.round((exportDone / exportTotal) * 100) : 0;
 
   const totals = lastJob?.totals ?? { total: 0, uploaded: 0, failed: 0, skipped: 0 };
   const overallPct = lastJob ? computeOverallProgress(lastJob) : 0;
@@ -89,27 +107,57 @@ export function Dashboard() {
         <StatCard
           icon={<Clock size={18} color="var(--color-warning)" />}
           iconBg="var(--color-warning-muted)"
-          value={activeJob ? '1' : '0'}
+          value={activeCount}
           label="In Progress"
-          sub={activeJob ? activeJob.status : 'No active migration'}
-          valueColor={activeJob ? 'var(--color-warning)' : undefined}
+          sub={progressSub}
+          valueColor={activeCount > 0 ? 'var(--color-warning)' : undefined}
         />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20 }}>
         {/* Left: Progress + History */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* Active job */}
-          {activeJob && (
-            <div className="card">
-              <div className="card-title">Active Migration</div>
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontSize: 13, color: 'var(--color-text)' }}>{activeJob.id}</span>
-                  <Badge variant="warning">{activeJob.status}</Badge>
+          {/* Active jobs */}
+          {(activeJob || exportRunning || importRunning) && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {activeJob && (
+                <div className="card">
+                  <div className="card-title">Active Direct Migration</div>
+                  <div style={{ marginBottom: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 13, color: 'var(--color-text)' }}>{activeJob.id}</span>
+                      <Badge variant="warning">{activeJob.status}</Badge>
+                    </div>
+                    <ProgressBar value={computeOverallProgress(activeJob)} showLabel height={6} />
+                  </div>
                 </div>
-                <ProgressBar value={computeOverallProgress(activeJob)} showLabel height={6} />
-              </div>
+              )}
+              {exportRunning && (
+                <div className="card">
+                  <div className="card-title">Active NDJSON Export</div>
+                  <div style={{ marginBottom: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 13, color: 'var(--color-text)' }}>Exporting {exportDone}/{exportTotal} resource types</span>
+                      <Badge variant="warning">Exporting</Badge>
+                    </div>
+                    <ProgressBar value={exportPct} showLabel height={6} />
+                  </div>
+                </div>
+              )}
+              {importRunning && (
+                <div className="card">
+                  <div className="card-title">Active NDJSON Import</div>
+                  <div style={{ marginBottom: 4 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 13, color: 'var(--color-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>
+                        Importing: {importFileName}
+                      </span>
+                      <Badge variant="warning">Importing</Badge>
+                    </div>
+                    <ProgressBar value={importState.progress} showLabel height={6} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

@@ -8,7 +8,7 @@ import { log } from '../store/logStore';
 import type { ServerConfig } from '../types/server';
 import type { FhirResource, FhirResourceType } from '../types/fhir';
 
-export const PAGE_SIZE = 50;
+export const PAGE_SIZE = 100;
 
 export interface DownloadOptions {
   /** Called for each page of resources received */

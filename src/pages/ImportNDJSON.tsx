@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useRef } from 'react';
 import { Upload, FileText, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 import { Topbar } from '../components/layout/Topbar';
 import { Button } from '../components/ui/Button';
@@ -7,26 +7,8 @@ import { ProgressBar } from '../components/ui/ProgressBar';
 import { ServerCard } from '../components/server/ServerCard';
 import { useServerStore } from '../store/serverStore';
 import { useMappingStore } from '../store/mappingStore';
-import { rewriteReferences } from '../services/mapper';
-import { buildTransactionBundles } from '../services/bundleBuilder';
-import { uploadBundles } from '../services/uploader';
+import { useImportStore, type ParsedFile } from '../store/importStore';
 import type { FhirResource, FhirResourceType } from '../types/fhir';
-import { log } from '../store/logStore';
-
-interface ParsedFile {
-  resources: FhirResource[];
-  byType: Partial<Record<FhirResourceType, number>>;
-  lineCount: number;
-  errors: number;
-}
-
-interface UploadState {
-  status: 'idle' | 'uploading' | 'done' | 'error';
-  success: number;
-  failed: number;
-  total: number;
-  progress: number;
-}
 
 function parseNDJSON(content: string): ParsedFile {
   const lines = content.split('\n').filter((l) => l.trim());
@@ -52,82 +34,35 @@ export function ImportNDJSON() {
   const { target } = useServerStore();
   const { rules } = useMappingStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [parsed, setParsed] = useState<ParsedFile | null>(null);
-  const [fileName, setFileName] = useState('');
-  const [uploadState, setUploadState] = useState<UploadState>({
-    status: 'idle',
-    success: 0,
-    failed: 0,
-    total: 0,
-    progress: 0,
-  });
+  
+  const {
+    parsed,
+    fileName,
+    uploadState,
+    setFile,
+    startImport,
+    cancelImport,
+    reset,
+  } = useImportStore();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setFileName(file.name);
 
     const reader = new FileReader();
     reader.onload = (ev) => {
       const content = ev.target?.result as string;
       const result = parseNDJSON(content);
-      setParsed(result);
-      setUploadState({ status: 'idle', success: 0, failed: 0, total: result.resources.length, progress: 0 });
+      setFile(file.name, result);
     };
     reader.readAsText(file);
   };
 
-  const handleUpload = async () => {
-    if (!parsed || !target.baseUrl) return;
-
-    setUploadState((s) => ({ ...s, status: 'uploading' }));
-    log({ level: 'info', message: `Starting NDJSON import: ${parsed.resources.length} resources from ${fileName}` });
-
-    // Apply mapping rules
-    const mapped = parsed.resources.map((r) => rewriteReferences(r, rules));
-
-    // Group by resource type and upload
-    const byType = new Map<FhirResourceType, FhirResource[]>();
-    for (const r of mapped) {
-      const rt = r.resourceType;
-      if (!byType.has(rt)) byType.set(rt, []);
-      byType.get(rt)!.push(r);
-    }
-
-    let totalSuccess = 0;
-    let totalFailed = 0;
-    let processed = 0;
-
-    try {
-      for (const [rt, resources] of byType.entries()) {
-        const bundles = buildTransactionBundles(resources);
-        await uploadBundles(target, bundles, rt, (result) => {
-          totalSuccess = result.success;
-          totalFailed = result.failed;
-          processed = result.success + result.failed;
-          setUploadState({
-            status: 'uploading',
-            success: totalSuccess,
-            failed: totalFailed,
-            total: parsed.resources.length,
-            progress: Math.round((processed / parsed.resources.length) * 100),
-          });
-        });
-      }
-      setUploadState({
-        status: 'done',
-        success: totalSuccess,
-        failed: totalFailed,
-        total: parsed.resources.length,
-        progress: 100,
-      });
-      log({ level: 'success', message: `Import complete: ${totalSuccess} ok, ${totalFailed} failed` });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setUploadState((s) => ({ ...s, status: 'error' }));
-      log({ level: 'error', message: `Import failed: ${msg}` });
-    }
+  const handleUpload = () => {
+    startImport(target, rules);
   };
+
+  const isUploading = uploadState.status === 'uploading';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 800 }}>
@@ -135,16 +70,28 @@ export function ImportNDJSON() {
         title="Import from NDJSON"
         subtitle="Upload a NDJSON file and send resources to the target server"
         actions={
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Upload size={13} />}
-            disabled={!parsed || !target.baseUrl || uploadState.status === 'uploading'}
-            loading={uploadState.status === 'uploading'}
-            onClick={handleUpload}
-          >
-            Upload to Server
-          </Button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {isUploading && (
+              <Button
+                variant="danger"
+                size="sm"
+                icon={<XCircle size={13} />}
+                onClick={cancelImport}
+              >
+                Batal
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Upload size={13} />}
+              disabled={!parsed || !target.baseUrl || isUploading}
+              loading={isUploading}
+              onClick={handleUpload}
+            >
+              Upload to Server
+            </Button>
+          </div>
         }
       />
 
@@ -159,13 +106,14 @@ export function ImportNDJSON() {
                 borderRadius: 'var(--radius-lg)',
                 padding: '32px 16px',
                 textAlign: 'center',
-                cursor: 'pointer',
+                cursor: isUploading ? 'not-allowed' : 'pointer',
                 transition: 'border-color 150ms',
               }}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => !isUploading && fileInputRef.current?.click()}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
+                if (isUploading) return;
                 const file = e.dataTransfer.files[0];
                 if (file && fileInputRef.current) {
                   const dt = new DataTransfer();
@@ -188,6 +136,7 @@ export function ImportNDJSON() {
                 accept=".ndjson,.json"
                 style={{ display: 'none' }}
                 onChange={handleFileChange}
+                disabled={isUploading}
               />
             </div>
           </Card>
@@ -250,6 +199,14 @@ export function ImportNDJSON() {
                 <span className={uploadState.failed > 0 ? 'text-error' : ''}>✕ {uploadState.failed}</span>
               </div>
             </Card>
+          )}
+
+          {!isUploading && parsed && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button variant="ghost" size="sm" onClick={reset}>
+                Clear File Preview
+              </Button>
+            </div>
           )}
 
           {!target.baseUrl && (

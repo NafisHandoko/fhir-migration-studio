@@ -1,86 +1,39 @@
-import { useState } from 'react';
-import { Download, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Download, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import { Topbar } from '../components/layout/Topbar';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { ProgressBar } from '../components/ui/ProgressBar';
 import { ServerCard } from '../components/server/ServerCard';
 import { useServerStore } from '../store/serverStore';
-import { downloadResourceType } from '../services/downloader';
-import { MIGRATABLE_RESOURCE_TYPES, type FhirResourceType, type FhirResource } from '../types/fhir';
-
-interface ResourceDownloadState {
-  total: number;
-  downloaded: number;
-  status: 'idle' | 'running' | 'done' | 'error';
-  error?: string;
-}
+import { useExportStore } from '../store/exportStore';
+import { MIGRATABLE_RESOURCE_TYPES } from '../types/fhir';
 
 export function ExportNDJSON() {
   const { source } = useServerStore();
-  const [selected, setSelected] = useState<Set<FhirResourceType>>(
-    new Set(MIGRATABLE_RESOURCE_TYPES),
-  );
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState<Partial<Record<FhirResourceType, ResourceDownloadState>>>({});
+  const {
+    running,
+    selected,
+    progress,
+    toggleResource,
+    selectAll,
+    selectNone,
+    startExport,
+    cancelExport,
+    reset,
+    hasFinished,
+    totalExportedCount,
+  } = useExportStore();
 
-  const toggleResource = (rt: FhirResourceType) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(rt)) next.delete(rt);
-      else next.add(rt);
-      return next;
-    });
+  const handleExport = () => {
+    startExport(source);
   };
 
-  const handleExport = async () => {
-    if (!source.baseUrl) return;
-    setRunning(true);
-
-    const allResources: FhirResource[] = [];
-
-    for (const rt of Array.from(selected)) {
-      setProgress((p) => ({
-        ...p,
-        [rt]: { total: 0, downloaded: 0, status: 'running' },
-      }));
-
-      try {
-        const resources = await downloadResourceType(source, rt, {
-          onPage: (_page, downloaded, total) => {
-            setProgress((p) => ({
-              ...p,
-              [rt]: { total, downloaded, status: 'running' },
-            }));
-          },
-        });
-
-        allResources.push(...resources);
-        setProgress((p) => ({
-          ...p,
-          [rt]: { total: resources.length, downloaded: resources.length, status: 'done' },
-        }));
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setProgress((p) => ({
-          ...p,
-          [rt]: { total: 0, downloaded: 0, status: 'error', error: msg },
-        }));
-      }
+  const toggleAll = () => {
+    if (selected.length === MIGRATABLE_RESOURCE_TYPES.length) {
+      selectNone();
+    } else {
+      selectAll();
     }
-
-    // Build NDJSON
-    const ndjson = allResources.map((r) => JSON.stringify(r)).join('\n');
-    const blob = new Blob([ndjson], { type: 'application/x-ndjson' });
-    const url = URL.createObjectURL(blob);
-    const filename = `fhir-export-${new Date().toISOString().slice(0, 10)}.ndjson`;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    setRunning(false);
   };
 
   const totalDownloaded = Object.values(progress).reduce((s, p) => s + (p?.downloaded ?? 0), 0);
@@ -92,16 +45,28 @@ export function ExportNDJSON() {
         title="Export to NDJSON"
         subtitle="Download FHIR resources from source server as NDJSON file"
         actions={
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Download size={13} />}
-            loading={running}
-            disabled={running || !source.baseUrl || selected.size === 0}
-            onClick={handleExport}
-          >
-            Export & Download
-          </Button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {running && (
+              <Button
+                variant="danger"
+                size="sm"
+                icon={<XCircle size={13} />}
+                onClick={cancelExport}
+              >
+                Batal
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Download size={13} />}
+              loading={running}
+              disabled={running || !source.baseUrl || selected.length === 0}
+              onClick={handleExport}
+            >
+              Export & Download
+            </Button>
+          </div>
         }
       />
 
@@ -115,8 +80,24 @@ export function ExportNDJSON() {
           )}
 
           <Card title="Resource Types to Export">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <label className="checkbox-group">
+                <input
+                  type="checkbox"
+                  checked={selected.length === MIGRATABLE_RESOURCE_TYPES.length}
+                  onChange={toggleAll}
+                  disabled={running}
+                />
+                <span className="checkbox-label" style={{ fontWeight: 600 }}>Select All</span>
+              </label>
+              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                ({selected.length} of {MIGRATABLE_RESOURCE_TYPES.length} selected)
+              </span>
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
               {MIGRATABLE_RESOURCE_TYPES.map((rt) => {
+                const isSelected = selected.includes(rt);
                 const p = progress[rt];
                 return (
                   <label
@@ -126,8 +107,8 @@ export function ExportNDJSON() {
                       padding: '6px 8px',
                       borderRadius: 4,
                       border: '1px solid',
-                      borderColor: selected.has(rt) ? 'var(--color-primary)' : 'var(--color-border)',
-                      backgroundColor: selected.has(rt) ? 'var(--color-primary-muted)' : 'transparent',
+                      borderColor: isSelected ? 'var(--color-primary)' : 'var(--color-border)',
+                      backgroundColor: isSelected ? 'var(--color-primary-muted)' : 'transparent',
                       cursor: running ? 'not-allowed' : 'pointer',
                       flexDirection: 'column',
                       alignItems: 'flex-start',
@@ -136,7 +117,7 @@ export function ExportNDJSON() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <input
                         type="checkbox"
-                        checked={selected.has(rt)}
+                        checked={isSelected}
                         onChange={() => !running && toggleResource(rt)}
                         disabled={running}
                       />
@@ -172,12 +153,22 @@ export function ExportNDJSON() {
             <div className={`alert ${running ? 'alert-info' : 'alert-success'}`}>
               {running ? (
                 <span>Downloading... {totalDownloaded.toLocaleString()} resources fetched</span>
-              ) : (
+              ) : hasFinished ? (
                 <>
                   <CheckCircle2 size={15} />
-                  <span>Export complete. {totalDownloaded.toLocaleString()} resources downloaded.</span>
+                  <span>Export complete. {totalExportedCount.toLocaleString()} resources downloaded.</span>
                 </>
+              ) : (
+                <span>Export stopped. Ready for next operation.</span>
               )}
+            </div>
+          )}
+
+          {!running && hasProgress && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button variant="ghost" size="sm" onClick={reset}>
+                Reset Progress View
+              </Button>
             </div>
           )}
         </div>

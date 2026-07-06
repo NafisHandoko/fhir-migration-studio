@@ -82,10 +82,15 @@ export async function uploadBundles(
   bundles: Bundle[],
   resourceType: FhirResourceType,
   onProgress: (result: UploadResult) => void,
+  shouldContinue?: () => boolean,
 ): Promise<UploadResult> {
   const aggregate: UploadResult = { success: 0, failed: 0, total: 0, errors: [] };
 
   for (let i = 0; i < bundles.length; i++) {
+    if (shouldContinue && !shouldContinue()) {
+      log({ level: 'warn', message: `Upload aborted: ${resourceType}`, resourceType });
+      break;
+    }
     const bundle = bundles[i];
     const bundleSize = bundle.entry?.length ?? 0;
     aggregate.total += bundleSize;

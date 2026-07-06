@@ -92,12 +92,21 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
 
       // Phase 5: Upload
       store.updateStatus('uploading');
-      await uploadBundles(target, bundles, resourceType, (result) => {
-        useMigrationStore.getState().updateResourceProgress(resourceType, {
-          uploaded: result.success,
-          failed: result.failed,
-        });
-      });
+      await uploadBundles(
+        target,
+        bundles,
+        resourceType,
+        (result) => {
+          useMigrationStore.getState().updateResourceProgress(resourceType, {
+            uploaded: result.success,
+            failed: result.failed,
+          });
+        },
+        () => {
+          const status = useMigrationStore.getState().current?.status;
+          return status !== 'cancelled' && status !== 'paused';
+        }
+      );
     }
 
     // Phase 6: Complete

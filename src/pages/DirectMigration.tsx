@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Play,
@@ -41,7 +41,22 @@ export function DirectMigration() {
     new Set(MIGRATABLE_RESOURCE_TYPES),
   );
   const [running, setRunning] = useState(false);
-  void running; // checked via setRunning — used as a lock to prevent double-start
+  void running;
+
+  // Sync step state with the active job if one is running or completed
+  useEffect(() => {
+    if (job) {
+      if (job.status === 'done' || job.status === 'error') {
+        setStep('done');
+      } else if (job.status === 'cancelled' || job.status === 'idle') {
+        setStep('configure');
+      } else {
+        setStep('running');
+      }
+    } else {
+      setStep('configure');
+    }
+  }, [job]);
 
   const toggleResource = (rt: FhirResourceType) => {
     setSelected((prev) => {
@@ -280,7 +295,7 @@ export function DirectMigration() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Array.from(selected).map((rt) => {
+                  {(job ? job.resourceTypes : Array.from(selected)).map((rt) => {
                     const p = job.progress[rt];
                     const pct = p && p.total > 0 ? Math.round((p.uploaded / p.total) * 100) : 0;
                     return (
