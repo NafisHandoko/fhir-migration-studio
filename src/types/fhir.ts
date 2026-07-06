@@ -20,6 +20,8 @@ export type FhirResourceType =
   | 'AuditEvent'
   | 'Consent'
   | 'Questionnaire'
+  | 'Schedule'
+  | 'Slot'
   | 'Practitioner'
   | 'Location'
   | 'HealthcareService';
@@ -41,6 +43,8 @@ export const MIGRATABLE_RESOURCE_TYPES: FhirResourceType[] = [
   'AuditEvent',
   'Consent',
   'Questionnaire',
+  'Schedule',
+  'Slot',
 ];
 
 export const REFERENCE_RESOURCE_TYPES: FhirResourceType[] = [

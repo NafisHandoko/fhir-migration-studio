@@ -25,9 +25,10 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Upload a single Transaction Bundle to the target server.
+ * Returns the raw response Bundle (transaction-response type).
  * Retries up to MAX_RETRIES times on transient errors (5xx).
  */
-async function uploadBundle(
+export async function uploadSingleBundle(
   config: ServerConfig,
   bundle: Bundle,
   attempt = 1,
@@ -44,7 +45,7 @@ async function uploadBundle(
       const delay = RETRY_DELAY_MS * Math.pow(2, attempt - 1);
       log({ level: 'warn', message: `Upload failed (attempt ${attempt}), retrying in ${delay}ms...` });
       await sleep(delay);
-      return uploadBundle(config, bundle, attempt + 1);
+      return uploadSingleBundle(config, bundle, attempt + 1);
     }
 
     throw err;
@@ -102,7 +103,7 @@ export async function uploadBundles(
         resourceType,
       });
 
-      const responseBundle = await uploadBundle(config, bundle);
+      const responseBundle = await uploadSingleBundle(config, bundle);
       const { success, failed, errors } = parseResponse(responseBundle);
 
       aggregate.success += success;
