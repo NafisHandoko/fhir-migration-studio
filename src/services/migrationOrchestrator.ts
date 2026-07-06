@@ -40,20 +40,47 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
   log({ level: 'info', message: `Migration ${job.id} started`, jobId: job.id });
 
   try {
-    // Phase 1: Scan
-    store.updateStatus('scanning');
-    log({ level: 'info', message: 'Scanning source server...', jobId: job.id });
-    const counts = await scanResourceCounts(source, resourceTypes);
-
-    // Initialize progress totals from scan
+    // Initialize progress totals to 0 first (so they appear in the UI)
     for (const rt of resourceTypes) {
       useMigrationStore.getState().updateResourceProgress(rt, {
-        total: counts[rt] ?? 0,
+        total: 0,
         downloaded: 0,
         uploaded: 0,
         failed: 0,
         skipped: 0,
       });
+    }
+
+    const checkStatus = async () => {
+      let status = useMigrationStore.getState().current?.status;
+      if (status === 'cancelled') return false;
+      if (status === 'paused') {
+        await waitForResume();
+        status = useMigrationStore.getState().current?.status;
+        if (status === 'cancelled') return false;
+      }
+      return true;
+    };
+
+    // Phase 1: Scan
+    store.updateStatus('scanning');
+    log({ level: 'info', message: 'Scanning source server...', jobId: job.id });
+    
+    await scanResourceCounts(
+      source,
+      resourceTypes,
+      (rt, count) => {
+        useMigrationStore.getState().updateResourceProgress(rt, {
+          total: count,
+        });
+      },
+      checkStatus
+    );
+
+    // Stop if cancelled during scanning
+    if (useMigrationStore.getState().current?.status === 'cancelled') {
+      log({ level: 'warn', message: `Migration ${job.id} cancelled during scanning phase`, jobId: job.id });
+      return;
     }
 
     // Phase 2-4: Download, Map, Upload per resource type

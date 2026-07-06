@@ -11,7 +11,7 @@
 import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
 
 /** Maximum resources per transaction bundle */
-const BUNDLE_BATCH_SIZE = 50;
+const BUNDLE_BATCH_SIZE = 100000;
 
 function generateUrn(): string {
   // Use crypto.randomUUID if available, else fallback

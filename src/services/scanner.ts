@@ -19,16 +19,31 @@ export type ScanResult = Partial<Record<FhirResourceType, number>>;
 export async function scanResourceCounts(
   config: ServerConfig,
   resourceTypes: FhirResourceType[],
+  onProgress?: (resourceType: FhirResourceType, count: number) => void,
+  shouldContinue?: () => Promise<boolean> | boolean,
 ): Promise<ScanResult> {
   const result: ScanResult = {};
 
   for (const resourceType of resourceTypes) {
+    if (shouldContinue) {
+      const keepGoing = await shouldContinue();
+      if (!keepGoing) {
+        log({ level: 'warn', message: `Scanning cancelled/stopped for ${resourceType}` });
+        break;
+      }
+    }
+
     try {
       const bundle = await fhirClient.search(config, resourceType, {
         _summary: 'count',
       });
       const count = bundle.total ?? 0;
       result[resourceType] = count;
+      
+      if (onProgress) {
+        onProgress(resourceType, count);
+      }
+
       log({
         level: 'info',
         message: `Found ${count} ${resourceType} resources`,
@@ -42,6 +57,10 @@ export async function scanResourceCounts(
         resourceType,
       });
       result[resourceType] = 0;
+      
+      if (onProgress) {
+        onProgress(resourceType, 0);
+      }
     }
   }
 
