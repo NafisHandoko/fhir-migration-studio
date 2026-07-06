@@ -36,12 +36,28 @@ export function generateUrn(): string {
   return `urn:uuid:${hex()}-${hex().slice(0, 4)}-4${hex().slice(0, 3)}-${hex().slice(0, 4)}-${hex()}${hex().slice(0, 4)}`;
 }
 
-/** Strip server-assigned meta fields but keep extension, profile, tag */
-function cleanMeta(meta: FhirResource['meta']): FhirResource['meta'] | undefined {
-  if (!meta) return undefined;
+/**
+ * Extension stamped onto every resource sent to the target server.
+ * Allows easy identification of migrated resources in the future.
+ */
+const MIGRATION_MARKER: { url: string; valueString: string } = {
+  url: 'https://ehealth.co.id/terminology/initiator-component',
+  valueString: 'fhir-migration-tool',
+};
+
+/**
+ * Strip server-assigned meta fields (versionId, lastUpdated), keep everything
+ * else (extension, profile, tag), and inject the migration marker extension.
+ * Always returns a Meta object — never undefined.
+ */
+function cleanMeta(meta: FhirResource['meta']): FhirResource['meta'] {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { versionId: _v, lastUpdated: _l, ...rest } = meta;
-  return Object.keys(rest).length > 0 ? rest as FhirResource['meta'] : undefined;
+  const { versionId: _v, lastUpdated: _l, ...rest } = (meta ?? {}) as NonNullable<FhirResource['meta']>;
+  return {
+    ...rest,
+    // Append the migration marker to the existing extensions (preserving originals)
+    extension: [...(rest.extension ?? []), MIGRATION_MARKER],
+  } as FhirResource['meta'];
 }
 
 // ---------------------------------------------------------------------------
@@ -57,14 +73,10 @@ export function buildTransactionBundle(resources: FhirResource[]): Bundle {
   const entries: BundleEntry[] = resources.map((resource) => {
     const { id: _id, meta, ...rest } = resource;
     void _id;
-    const cleaned = cleanMeta(meta);
 
     return {
       fullUrl: generateUrn(),
-      resource: {
-        ...rest,
-        ...(cleaned !== undefined ? { meta: cleaned } : {}),
-      } as FhirResource,
+      resource: { ...rest, meta: cleanMeta(meta) } as FhirResource,
       request: { method: 'POST', url: resource.resourceType },
     };
   });
@@ -169,16 +181,12 @@ export function buildCrossReferencedBundle(
     const originalRef = resource.id ? `${resource.resourceType}/${resource.id}` : null;
     const fullUrl = (originalRef ? uuidMap.get(originalRef) : null) ?? generateUrn();
 
-    // Strip id & clean meta
+    // Strip id & clean meta (also injects migration marker)
     const { id: _id, meta, ...rest } = resource;
     void _id;
-    const cleaned = cleanMeta(meta);
 
     // Rewrite internal cross-references within this resource's body
-    const bodyToRewrite: Record<string, unknown> = {
-      ...rest,
-      ...(cleaned !== undefined ? { meta: cleaned } : {}),
-    };
+    const bodyToRewrite: Record<string, unknown> = { ...rest, meta: cleanMeta(meta) };
     const rewritten = rewriteRefsInNode(bodyToRewrite, uuidMap) as Record<string, unknown>;
 
     return {
