@@ -160,6 +160,7 @@ export function createCheckpoint(
   jobId: string,
   sourceUrl: string,
   targetUrl: string,
+  selectedResourceTypes: FhirResourceType[],
   userDefinedMappings: Record<string, string> = {},
 ): MigrationCheckpoint {
   return {
@@ -168,6 +169,7 @@ export function createCheckpoint(
     startedAt: new Date().toISOString(),
     sourceUrl,
     targetUrl,
+    selectedResourceTypes,
     completedResourceTypes: [],
     patientLinkPatched: false,
     idMappings: { ...userDefinedMappings },

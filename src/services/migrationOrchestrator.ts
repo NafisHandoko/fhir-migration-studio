@@ -112,6 +112,7 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
     job.id,
     source.baseUrl,
     target.baseUrl,
+    resourceTypes,
     userDefinedMappings,
   );
   await saveCheckpoint(initialCheckpoint);
@@ -144,9 +145,10 @@ export async function resumeDirectMigration(
   }
 
   const { source, target } = serverOverrides;
+  const selectedResourceTypes = checkpoint.selectedResourceTypes ?? MIGRATABLE_RESOURCE_TYPES;
 
   const store = useMigrationStore.getState();
-  const job = createDefaultJob('direct', MIGRATABLE_RESOURCE_TYPES);
+  const job = createDefaultJob('direct', selectedResourceTypes);
   // Preserve original start time for display
   job.id = jobId;
   job.startedAt = checkpoint.startedAt;
@@ -164,7 +166,7 @@ export async function resumeDirectMigration(
     job,
     source,
     target,
-    selectedResourceTypes: MIGRATABLE_RESOURCE_TYPES,
+    selectedResourceTypes,
     bundleSize: DEFAULT_BUNDLE_SIZE,
     checkpoint,
   });

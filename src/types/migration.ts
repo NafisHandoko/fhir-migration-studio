@@ -84,6 +84,10 @@ export interface MigrationCheckpoint {
    */
   completedResourceTypes: FhirResourceType[];
   /**
+   * The list of resource types selected for migration by the user.
+   */
+  selectedResourceTypes?: FhirResourceType[];
+  /**
    * True once the Patient.link.other restore step (PUT) has completed.
    */
   patientLinkPatched: boolean;
