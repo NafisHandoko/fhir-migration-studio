@@ -19,7 +19,7 @@ export type FhirResourceType =
   | 'Coverage'
   | 'AuditEvent'
   | 'Consent'
-  // | 'Questionnaire'
+  | 'Questionnaire'
   | 'Schedule'
   | 'Slot'
   | 'Practitioner'
@@ -27,27 +27,36 @@ export type FhirResourceType =
   | 'HealthcareService'
   | 'Organization';
 
+/**
+ * Resource types that can be migrated (user-selectable in UI).
+ * Ordered by dependency (dependencies first).
+ * This is the canonical migration order per docs/FHIR_RULES.md.
+ */
 export const MIGRATABLE_RESOURCE_TYPES: FhirResourceType[] = [
+  'Questionnaire',
   'Patient',
-  'Appointment',
-  'Encounter',
-  'Composition',
-  'Condition',
-  'Observation',
-  'AllergyIntolerance',
-  'ClinicalImpression',
-  'MedicationRequest',
-  'MedicationDispense',
-  'Procedure',
-  'ProcedureRequest',
   'Coverage',
-  'AuditEvent',
-  'Consent',
-  // 'Questionnaire',
   'Schedule',
   'Slot',
+  'Appointment',
+  'Condition',
+  'Encounter',
+  'Observation',
+  'AllergyIntolerance',
+  'Procedure',
+  'ProcedureRequest',
+  'MedicationRequest',
+  'MedicationDispense',
+  'ClinicalImpression',
+  'Composition',
+  'Consent',
+  'AuditEvent',
 ];
 
+/**
+ * Resource types that already exist on the target server and are referenced
+ * but NOT migrated. Their IDs are rewritten via user-defined MappingRules.
+ */
 export const REFERENCE_RESOURCE_TYPES: FhirResourceType[] = [
   'Practitioner',
   'Location',

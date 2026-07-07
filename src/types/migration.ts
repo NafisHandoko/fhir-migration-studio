@@ -10,7 +10,7 @@ export type MigrationStatus =
   | 'downloading'
   | 'mapping'
   | 'uploading'
-  | 'patching'     // Phase 1b: restoring Patient.link.other after all Patients are created
+  | 'patching'     // Restoring Patient.link.other after all Patients are created
   | 'validating'
   | 'done'
   | 'error'
@@ -64,31 +64,32 @@ export interface MigrationReport {
  * Used to resume a migration after an app crash or server disconnection.
  *
  * File location: {AppLocalData}/checkpoints/{jobId}.json
+ *
+ * v2 — Replaces the old phase1/phase1b/phase2 structure with a flat
+ *       per-resource-type tracking model that matches the new dependency-driven
+ *       migration pipeline. v1 checkpoints are NOT compatible.
  */
 export interface MigrationCheckpoint {
   /** Schema version — bump if the shape changes incompatibly */
-  version: 1;
+  version: 2;
   jobId: string;
   startedAt: string;
   /** Base URL of the source FHIR server (for display purposes on resume) */
   sourceUrl: string;
   /** Base URL of the target FHIR server (for display purposes on resume) */
   targetUrl: string;
-  /** Current phase — updated as migration progresses */
-  phase: 'phase1' | 'phase1b' | 'phase2' | 'done';
-  phase1: {
-    /** Resource types that have been fully uploaded (all batches successful) */
-    completedResourceTypes: FhirResourceType[];
-    /** True once Phase 1b (Patient.link.other restore) has completed */
-    patientLinkPatched: boolean;
-  };
-  phase2: {
-    /** Encounter IDs that have been successfully uploaded */
-    completedEncounterIds: string[];
-  };
+  /**
+   * Resource types that have been fully uploaded (all batches successful).
+   * Used to skip already-completed types when resuming.
+   */
+  completedResourceTypes: FhirResourceType[];
+  /**
+   * True once the Patient.link.other restore step (PUT) has completed.
+   */
+  patientLinkPatched: boolean;
   /**
    * All known ID mappings — both user-defined (Practitioner/Location/
-   * HealthcareService/Organization) and server-assigned (Patient/Schedule/Slot/…).
+   * HealthcareService/Organization) and server-assigned (Patient/Coverage/…).
    * Format: { "Patient/100": "Patient/987", "HealthcareService/6301787": "HealthcareService/105" }
    */
   idMappings: Record<string, string>;
@@ -100,9 +101,7 @@ export interface CheckpointSummary {
   startedAt: string;
   sourceUrl: string;
   targetUrl: string;
-  phase: MigrationCheckpoint['phase'];
-  completedPhase1Types: number;
-  completedEncounters: number;
+  completedResourceTypes: FhirResourceType[];
   totalMappings: number;
 }
 

@@ -1,27 +1,24 @@
 /**
  * Bundle Builder — builds FHIR DSTU3 Transaction Bundles.
  *
- * Three exported builders:
+ * Two exported builders:
  *
  * 1. buildTransactionBundle / buildTransactionBundles  (NDJSON import path)
  *    Simple batch builder — each resource gets a random urn:uuid, no cross-reference
  *    rewriting. Suitable for NDJSON import where refs are already resolved.
  *
- * 2. buildSharedResourceBundle  (Phase 1 — Shared Resources)
- *    Builds a Transaction Bundle for a batch of shared resources (Patient, Coverage,
- *    Schedule, Slot, Questionnaire). No internal cross-reference rewriting needed
- *    because these resource types don't reference each other within the same batch.
+ * 2. buildResourceTypeBundle  (Dependency Migration Pipeline)
+ *    Builds a Transaction Bundle for a batch of resources of a SINGLE resource type.
+ *    References have already been rewritten by the caller (via referenceRewriter +
+ *    ResourceMappingService) before this function is called.
  *    Returns the ordered list of original refs alongside the bundle so the caller can
  *    register the server-assigned IDs in ResourceMappingService.
  *
- * 3. buildEpisodeBundle  (Phase 2 — Clinical Episodes)
- *    Builds ONE Transaction Bundle for a single clinical episode (one Encounter).
- *    Resources within the bundle reference each other via urn:uuid.
- *    Resources outside the bundle (Patient, Practitioner, etc.) are rewritten using
- *    the externalRefMap from ResourceMappingService.
+ * Per docs/FHIR_RULES.md §Transaction Bundles:
+ *   Each bundle should only contain resources of a single resource type.
+ *   Bundle size is configurable (default 100).
  */
 
-import { rewriteRefsInNode } from './referenceRewriter';
 import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +43,7 @@ const MIGRATION_MARKER: { url: string; valueString: string } = {
 
 /**
  * Generate a new urn:uuid identifier.
- * Exported so orchestrators can pre-generate uuid maps.
+ * Exported so callers can pre-generate uuid maps.
  */
 export function generateUrn(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -110,10 +107,10 @@ export function buildTransactionBundles(
 }
 
 // ---------------------------------------------------------------------------
-// 2. Shared Resource Bundle (Phase 1)
+// 2. Resource-type bundle (Dependency Migration Pipeline)
 // ---------------------------------------------------------------------------
 
-export interface SharedBundleResult {
+export interface ResourceTypeBundleResult {
   bundle: Bundle;
   /**
    * Original "ResourceType/id" refs in the same order as bundle.entry[].
@@ -123,25 +120,24 @@ export interface SharedBundleResult {
 }
 
 /**
- * Build a Transaction Bundle for a batch of shared resources (Patient, Coverage,
- * Schedule, Slot, Questionnaire).
+ * Build a Transaction Bundle for a batch of resources of a SINGLE resource type.
  *
  * Each resource:
- *   - Gets a stable urn:uuid derived from its original id
+ *   - Gets a stable urn:uuid as fullUrl
  *   - Has its id stripped (the server assigns a new one)
  *   - Has meta cleaned and migration marker injected
  *
- * NOTE: Patient.link.other references are intentionally stripped here.
- * They are restored in a separate Phase 1b PATCH step after all Patients exist.
+ * IMPORTANT: References must have already been rewritten by the caller before
+ * passing resources here (using rewriteResourceRefs + ResourceMappingService).
  *
- * @param resources  Batch of shared resources
- * @param stripFields  Optional extra top-level fields to remove (used to strip
- *                     Patient.link before Phase 1a upload)
+ * @param resources    Batch of resources — must all be the same resource type
+ * @param stripFields  Optional extra top-level fields to remove (e.g. ["link"]
+ *                     to strip Patient.link before Phase 1a upload)
  */
-export function buildSharedResourceBundle(
+export function buildResourceTypeBundle(
   resources: FhirResource[],
   stripFields: string[] = [],
-): SharedBundleResult {
+): ResourceTypeBundleResult {
   const originalRefs: string[] = [];
 
   const entries: BundleEntry[] = resources.map((resource) => {
@@ -174,76 +170,8 @@ export function buildSharedResourceBundle(
   };
 }
 
-// ---------------------------------------------------------------------------
-// 3. Clinical Episode Bundle (Phase 2)
-// ---------------------------------------------------------------------------
-
 /**
- * Build ONE Transaction Bundle for a single clinical episode (one Encounter
- * and all its associated resources).
- *
- * Reference strategy:
- *   - Resources inside this bundle reference each other via urn:uuid  (internalUuidMap)
- *   - Resources outside this bundle (Patient, Practitioner, Slot, etc.) are
- *     rewritten to their destination IDs via externalRefMap (ResourceMappingService)
- *
- * The combined map is: externalRefMap first, then internalUuidMap — internal
- * refs take precedence so that intra-bundle links are always urn:uuid.
- *
- * @param resources      All resources belonging to this episode
- * @param internalUuidMap  Map<"ResourceType/oldId", "urn:uuid:…"> for resources
- *                         that are part of THIS bundle
- * @param externalRefMap   ReadonlyMap<"ResourceType/oldId", "ResourceType/newId">
- *                         from ResourceMappingService for already-migrated resources
+ * @deprecated Use buildResourceTypeBundle instead.
+ * Kept for backward compatibility during the transition.
  */
-export function buildEpisodeBundle(
-  resources: FhirResource[],
-  internalUuidMap: Map<string, string>,
-  externalRefMap: ReadonlyMap<string, string>,
-): Bundle {
-  // Merge: external first so internal (urn:uuid) overrides for intra-bundle refs
-  const mergedRefMap = new Map<string, string>([...externalRefMap, ...internalUuidMap]);
-
-  const entries: BundleEntry[] = resources.map((resource) => {
-    const originalRef = resource.id ? `${resource.resourceType}/${resource.id}` : null;
-    const fullUrl = (originalRef ? internalUuidMap.get(originalRef) : null) ?? generateUrn();
-
-    const { id: _id, meta, ...rest } = resource;
-    void _id;
-
-    const bodyToRewrite: Record<string, unknown> = { ...rest, meta: cleanMeta(meta) };
-    const rewritten = rewriteRefsInNode(bodyToRewrite, mergedRefMap) as Record<string, unknown>;
-
-    return {
-      fullUrl,
-      resource: { resourceType: resource.resourceType, ...rewritten } as FhirResource,
-      request: { method: 'POST', url: resource.resourceType },
-    };
-  });
-
-  return { resourceType: 'Bundle', type: 'transaction', entry: entries };
-}
-
-/**
- * Build the urn:uuid map for resources that will be included in a single episode bundle.
- * Maps "ResourceType/originalId" → "urn:uuid:…".
- *
- * @param resources   Resources that will be in this bundle
- * @param excludeTypes  Types that should NOT get a uuid (they are external references
- *                      resolved via ResourceMappingService instead)
- */
-export function buildInternalUuidMap(
-  resources: FhirResource[],
-  excludeTypes: ReadonlySet<string> = new Set(),
-): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const resource of resources) {
-    if (!resource.id) continue;
-    if (excludeTypes.has(resource.resourceType)) continue;
-    const ref = `${resource.resourceType}/${resource.id}`;
-    if (!map.has(ref)) {
-      map.set(ref, generateUrn());
-    }
-  }
-  return map;
-}
+export const buildSharedResourceBundle = buildResourceTypeBundle;

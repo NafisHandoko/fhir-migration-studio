@@ -190,11 +190,14 @@ export function DirectMigration() {
                 <span style={{ fontWeight: 600, fontSize: 13, fontFamily: 'monospace' }}>{cp.jobId}</span>
                 <span style={{ fontSize: 12, opacity: 0.7 }}>
                   Started: {new Date(cp.startedAt).toLocaleString()} &nbsp;·&nbsp;
-                  Phase: {cp.phase} &nbsp;·&nbsp;
-                  Phase 1: {cp.completedPhase1Types} types &nbsp;·&nbsp;
-                  Phase 2: {cp.completedEncounters} encounters &nbsp;·&nbsp;
-                  {cp.totalMappings} mappings saved
+                  Completed: {cp.completedResourceTypes.length} resource type{cp.completedResourceTypes.length !== 1 ? 's' : ''} &nbsp;·&nbsp;
+                  {cp.totalMappings.toLocaleString()} mappings saved
                 </span>
+                {cp.completedResourceTypes.length > 0 && (
+                  <span style={{ fontSize: 11, opacity: 0.55 }}>
+                    Done: {cp.completedResourceTypes.join(', ')}
+                  </span>
+                )}
                 <span style={{ fontSize: 11, opacity: 0.55 }}>
                   {cp.sourceUrl} → {cp.targetUrl}
                 </span>
