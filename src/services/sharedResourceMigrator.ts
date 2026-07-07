@@ -186,7 +186,14 @@ async function uploadSharedBatch(
     if (!(await checkStatus())) return;
 
     const batch = batches[i];
-    const { bundle, originalRefs } = buildSharedResourceBundle(batch, stripFields);
+
+    // Rewrite references in each resource using the current mapping
+    // (includes manual rules for Practitioner/Location/HealthcareService/Organization
+    //  that were registered into mappingService by the orchestrator at startup, as
+    //  well as any Patient/Coverage/Slot IDs that have already been migrated).
+    const rewrittenBatch = batch.map((r) => rewriteResourceRefs(r, mappingService.getMap()));
+
+    const { bundle, originalRefs } = buildSharedResourceBundle(rewrittenBatch, stripFields);
 
     log({
       level: 'info',
