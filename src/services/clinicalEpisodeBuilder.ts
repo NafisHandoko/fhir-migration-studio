@@ -91,6 +91,8 @@ export interface ClinicalMigratorOptions {
   source: ServerConfig;
   target: ServerConfig;
   jobId: string;
+  /** If provided, only download clinical resource types in this list (user's selection). */
+  resourceTypes?: FhirResourceType[];
 }
 
 export interface EpisodeBundleResult {
@@ -124,14 +126,19 @@ export async function* migrateClinicalEpisodes(
   onCheckpoint: (updated: MigrationCheckpoint) => void,
   checkStatus: () => Promise<boolean>,
 ): AsyncGenerator<EpisodeBundleResult> {
-  const { source, target, jobId } = options;
+  const { source, target, jobId, resourceTypes } = options;
+
+  // Only download/process types the user selected (defaults to all clinical types)
+  const typesToFetch = resourceTypes
+    ? CLINICAL_RESOURCE_TYPES.filter((rt) => resourceTypes.includes(rt))
+    : CLINICAL_RESOURCE_TYPES;
 
   // -------------------------------------------------------------------------
   // Download all clinical resource types into an in-memory index
   // -------------------------------------------------------------------------
   const byType = new Map<FhirResourceType, FhirResource[]>();
 
-  for (const resourceType of CLINICAL_RESOURCE_TYPES) {
+  for (const resourceType of typesToFetch) {
     if (!(await checkStatus())) return;
 
     log({ level: 'info', message: `[Phase 2] Downloading ${resourceType}...`, resourceType, jobId });
@@ -225,19 +232,30 @@ export async function* migrateClinicalEpisodes(
       continue;
     }
 
+    // Deduplicate resources to prevent having multiple copies of Encounter/Appointment/etc. in the same bundle
+    const uniqueMap = new Map<string, FhirResource>();
+    for (const r of episodeResources) {
+      if (r.id) {
+        uniqueMap.set(`${r.resourceType}/${r.id}`, r);
+      } else {
+        uniqueMap.set(`temp-${Math.random()}`, r);
+      }
+    }
+    const deduplicatedResources = Array.from(uniqueMap.values());
+
     // Build intra-bundle uuid map (resources INSIDE this bundle)
-    const internalUuidMap = buildInternalUuidMap(episodeResources, EXTERNAL_RESOURCE_TYPES);
+    const internalUuidMap = buildInternalUuidMap(deduplicatedResources, EXTERNAL_RESOURCE_TYPES);
 
     // Build the episode Transaction Bundle
     const bundle = buildEpisodeBundle(
-      episodeResources,
+      deduplicatedResources,
       internalUuidMap,
       mappingService.getMap(),
     );
 
     log({
       level: 'info',
-      message: `[Phase 2] Uploading Encounter/${encounterId} bundle (${episodeResources.length} resources)`,
+      message: `[Phase 2] Uploading Encounter/${encounterId} bundle (${deduplicatedResources.length} resources)`,
       jobId,
     });
 
@@ -246,7 +264,7 @@ export async function* migrateClinicalEpisodes(
 
     // Register any new IDs from the response (e.g. Encounter itself for future cross-refs)
     if (result.success > 0) {
-      const originalRefs = episodeResources.map((r) =>
+      const originalRefs = deduplicatedResources.map((r) =>
         r.id ? `${r.resourceType}/${r.id}` : '',
       );
       const responseEntries = (await getLastResponseEntries()) ?? [];
@@ -270,54 +288,144 @@ export async function* migrateClinicalEpisodes(
 
 /**
  * Build a Map<encounterId, FhirResource[]> grouping all clinical resources
- * (Composition, Condition, Observation, etc.) under their parent Encounter.
+ * under their parent Encounter.
  *
- * Uses the first "Encounter/id" reference found in each resource.
+ * Strategy (Composition-driven):
+ *   1. Index all downloaded clinical resources by "ResourceType/id".
+ *   2. For each Encounter, find its Composition (via Composition.encounter /
+ *      Composition.context reference).
+ *   3. Recursively follow every reference inside Composition to collect all
+ *      dependent resources (Condition, Observation, MedicationRequest, etc.),
+ *      even those that have no direct Encounter reference.
+ *
+ * This is more robust than the old "scan each resource for encounter ref"
+ * approach because Composition is the explicit manifest of all clinical data
+ * for an episode.
  */
 function buildClinicalIndex(
   byType: Map<FhirResourceType, FhirResource[]>,
   encounters: FhirResource[],
 ): Map<string, FhirResource[]> {
-  const encounterIds = new Set(encounters.map((e) => e.id).filter(Boolean) as string[]);
-  const index = new Map<string, FhirResource[]>();
-
-  // Initialise empty arrays for all encounter ids
-  for (const id of encounterIds) {
-    index.set(id, []);
-  }
-
-  const CLINICAL_TYPES: FhirResourceType[] = [
-    'Composition',
-    'Condition',
-    'Observation',
-    'AllergyIntolerance',
-    'ClinicalImpression',
-    'Procedure',
-    'ProcedureRequest',
-    'MedicationRequest',
-    'MedicationDispense',
-    'Consent',
-    'AuditEvent',
-  ];
-
-  for (const resourceType of CLINICAL_TYPES) {
-    const resources = byType.get(resourceType) ?? [];
+  // -------------------------------------------------------------------
+  // 1. Build a flat "ResourceType/id" → FhirResource index
+  // -------------------------------------------------------------------
+  const byId = new Map<string, FhirResource>();
+  for (const [, resources] of byType.entries()) {
     for (const resource of resources) {
-      const encounterId = extractEncounterRefId(resource);
-      if (encounterId && index.has(encounterId)) {
-        index.get(encounterId)!.push(resource);
-      } else {
-        // Resource has no recognizable Encounter ref — log and skip
-        log({
-          level: 'warn',
-          message: `[Phase 2] ${resource.resourceType}/${resource.id} has no Encounter reference — skipping`,
-          resourceType,
-        });
+      if (resource.id) {
+        byId.set(`${resource.resourceType}/${resource.id}`, resource);
       }
     }
   }
 
+  // -------------------------------------------------------------------
+  // 2. Index Compositions by their Encounter reference
+  // -------------------------------------------------------------------
+  const compositions = byType.get('Composition') ?? [];
+  const compositionByEncounterId = new Map<string, FhirResource>();
+  for (const comp of compositions) {
+    const encId = extractEncounterRefId(comp);
+    if (encId) compositionByEncounterId.set(encId, comp);
+  }
+
+  // -------------------------------------------------------------------
+  // 3. For each Encounter, collect all resources via Composition
+  // -------------------------------------------------------------------
+  const index = new Map<string, FhirResource[]>();
+
+  for (const encounter of encounters) {
+    const encounterId = encounter.id;
+    if (!encounterId) continue;
+
+    const composition = compositionByEncounterId.get(encounterId);
+    if (!composition) {
+      log({
+        level: 'warn',
+        message: `[Phase 2] Encounter/${encounterId}: no Composition found — episode will have no clinical resources`,
+        resourceType: 'Composition',
+      });
+      index.set(encounterId, []);
+      continue;
+    }
+
+    const episodeDeps: FhirResource[] = [composition];
+    const visitedRefs = new Set<string>([`Composition/${composition.id}`]);
+
+    // Recursively follow all references reachable from this Composition
+    collectCompositionResources(composition, byId, visitedRefs, episodeDeps);
+
+    index.set(encounterId, episodeDeps);
+  }
+
   return index;
+}
+
+/**
+ * Recursively walk all reference strings inside `resource` and collect
+ * the referenced resources from `byId`. Only clinical resources that exist
+ * in `byId` are included (external refs like Patient, Practitioner etc. are
+ * ignored — they are handled by ResourceMappingService).
+ */
+function collectCompositionResources(
+  resource: FhirResource,
+  byId: Map<string, FhirResource>,
+  visited: Set<string>,
+  out: FhirResource[],
+): void {
+  const refs = extractAllRefStrings(resource as Record<string, unknown>);
+  for (const ref of refs) {
+    if (visited.has(ref)) continue;
+    const dep = byId.get(ref);
+    if (!dep) continue; // external resource (Patient, Practitioner, etc.) — skip
+    visited.add(ref);
+    out.push(dep);
+    // Recurse so MedicationDispense → MedicationRequest chains are followed
+    collectCompositionResources(dep, byId, visited, out);
+  }
+}
+
+/**
+ * Walk a JSON node tree and collect all non-urn reference strings.
+ * Only returns references of the form "ResourceType/id".
+ */
+function extractAllRefStrings(node: Record<string, unknown>): string[] {
+  const refs: string[] = [];
+  collectRefStringsInto(node, refs);
+  return refs;
+}
+
+function collectRefStringsInto(node: unknown, out: string[]): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectRefStringsInto(item, out);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key === 'reference' && typeof obj[key] === 'string') {
+      const ref = obj[key] as string;
+      // Only include relative references that look like ResourceType/id
+      if (!ref.startsWith('urn:') && !ref.startsWith('http') && ref.includes('/')) {
+        // Strip query string or fragment if present
+        out.push(ref.split('?')[0].split('#')[0]);
+      }
+    } else {
+      collectRefStringsInto(obj[key], out);
+    }
+  }
+}
+
+
+
+/**
+ * Extract the Appointment reference string from an Encounter.
+ * FHIR DSTU3 Encounter uses Encounter.appointment (Reference).
+ */
+function extractAppointmentRef(encounter: FhirResource): string | undefined {
+  const r = encounter as Record<string, unknown>;
+  const appt = r['appointment'] as Record<string, unknown> | undefined;
+  if (appt && typeof appt.reference === 'string') return appt.reference;
+  return undefined;
 }
 
 /**
@@ -335,17 +443,6 @@ function extractEncounterRefId(resource: FhirResource): string | undefined {
     }
   }
 
-  return undefined;
-}
-
-/**
- * Extract the Appointment reference string from an Encounter.
- * FHIR DSTU3 Encounter uses Encounter.appointment (Reference).
- */
-function extractAppointmentRef(encounter: FhirResource): string | undefined {
-  const r = encounter as Record<string, unknown>;
-  const appt = r['appointment'] as Record<string, unknown> | undefined;
-  if (appt && typeof appt.reference === 'string') return appt.reference;
   return undefined;
 }
 

@@ -58,6 +58,8 @@ export interface SharedMigratorOptions {
   target: ServerConfig;
   bundleSize?: number;
   jobId: string;
+  /** If provided, only migrate resource types in this list (user's selection). */
+  resourceTypes?: FhirResourceType[];
 }
 
 // ---------------------------------------------------------------------------
@@ -83,14 +85,19 @@ export async function migrateSharedResources(
   onCheckpoint: (updated: MigrationCheckpoint) => void,
   checkStatus: () => Promise<boolean>,
 ): Promise<void> {
-  const { source, target, bundleSize = DEFAULT_SHARED_BUNDLE_SIZE, jobId } = options;
+  const { source, target, bundleSize = DEFAULT_SHARED_BUNDLE_SIZE, jobId, resourceTypes } = options;
+
+  // Only migrate types the user selected (defaults to all shared types)
+  const typesToMigrate = resourceTypes
+    ? SHARED_RESOURCE_TYPES.filter((rt) => resourceTypes.includes(rt))
+    : SHARED_RESOURCE_TYPES;
 
   // -------------------------------------------------------------------------
   // Step 1a: Migrate all non-Patient shared types + Patients WITHOUT link.other
   // -------------------------------------------------------------------------
   const patientResources: FhirResource[] = [];
 
-  for (const resourceType of SHARED_RESOURCE_TYPES) {
+  for (const resourceType of typesToMigrate) {
     if (!(await checkStatus())) return;
 
     // Skip resource types already completed in a previous (resumed) run
@@ -146,8 +153,8 @@ export async function migrateSharedResources(
 
     if (!(await checkStatus())) return;
 
-    // Mark resource type as fully completed and save checkpoint
-    if (!isPhase1TypeComplete(checkpoint, resourceType)) {
+    // Mark resource type as fully completed and save checkpoint (Patient is marked completed later after its actual upload)
+    if (resourceType !== 'Patient' && !isPhase1TypeComplete(checkpoint, resourceType)) {
       checkpoint = checkpointWithPhase1Type(checkpoint, resourceType);
       onCheckpoint(checkpoint);
       await saveCheckpoint(checkpoint);

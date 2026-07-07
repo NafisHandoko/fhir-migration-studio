@@ -62,7 +62,9 @@ export class ResourceMappingService {
    * Parse a FHIR transaction-response Bundle and register the new IDs.
    *
    * The server returns one entry per request entry (same order).
-   * entry.response.location looks like "Patient/987/_history/1".
+   * entry.response.location can be:
+   *   - Relative: "Patient/987/_history/1"
+   *   - Absolute: "http://server/fhir/Patient/987/_history/1"
    *
    * @param requestRefs  Array of old "ResourceType/id" refs in the same order
    *                     as the bundle entries that were submitted.
@@ -77,10 +79,15 @@ export class ResourceMappingService {
       const location = responseEntries[i]?.response?.location;
       if (!location) continue;
 
-      // location = "Patient/987/_history/1"  →  "Patient/987"
-      const parts = location.split('/');
-      if (parts.length >= 2) {
-        const newRef = `${parts[0]}/${parts[1]}`;
+      // Extract "ResourceType/id" from either relative or absolute URL.
+      // Regex matches the first segment that looks like a FHIR resource type
+      // (capital letter followed by letters) followed by "/id".
+      // Examples:
+      //   "Patient/987/_history/1"              → "Patient/987"
+      //   "http://server/fhir/Patient/987/_history/1" → "Patient/987"
+      const match = location.match(/\b([A-Z][a-zA-Z]+)\/([^\/\s]+)/);
+      if (match) {
+        const newRef = `${match[1]}/${match[2].split('?')[0].split('#')[0]}`;
         this._map.set(oldRef, newRef);
       }
     }

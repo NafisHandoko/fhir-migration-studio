@@ -430,14 +430,29 @@ export function DirectMigration() {
             </div>
           </Card>
 
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Button variant="secondary" size="sm" onClick={handleDownloadReport}>
               Download Report
             </Button>
             <Button variant="secondary" size="sm" onClick={() => navigate('/logs')}>
               View Logs
             </Button>
-            <Button variant="primary" size="sm" onClick={() => { setStep('configure'); }}>
+            {job.status === 'error' && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => handleResume(job.id)}
+                style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <RotateCcw size={14} />
+                Try Again (Resume)
+              </Button>
+            )}
+            <Button
+              variant={job.status === 'error' ? 'secondary' : 'primary'}
+              size="sm"
+              onClick={() => { setStep('configure'); }}
+            >
               New Migration
             </Button>
           </div>

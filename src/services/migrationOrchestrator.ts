@@ -258,7 +258,7 @@ async function _runMigration(args: RunMigrationArgs): Promise<void> {
       log({ level: 'info', message: '[Phase 1] Starting shared resource migration...', jobId: job.id });
 
       await migrateSharedResources(
-        { source, target, bundleSize, jobId: job.id },
+        { source, target, bundleSize, jobId: job.id, resourceTypes },
         mappingService,
         checkpoint,
         onCheckpoint,
@@ -290,7 +290,7 @@ async function _runMigration(args: RunMigrationArgs): Promise<void> {
     let totalFailed = 0;
 
     const episodeGenerator = migrateClinicalEpisodes(
-      { source, target, jobId: job.id },
+      { source, target, jobId: job.id, resourceTypes },
       mappingService,
       checkpoint,
       onCheckpoint,
