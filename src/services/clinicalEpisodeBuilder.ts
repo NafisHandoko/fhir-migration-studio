@@ -76,7 +76,7 @@ const EXTERNAL_RESOURCE_TYPES = new Set<string>([
   'Coverage',
   'Schedule',
   'Slot',
-  'Questionnaire',
+  // 'Questionnaire',
   'Practitioner',
   'Location',
   'HealthcareService',

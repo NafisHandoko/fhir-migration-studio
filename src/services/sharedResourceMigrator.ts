@@ -43,7 +43,7 @@ export const SHARED_RESOURCE_TYPES: FhirResourceType[] = [
   'Coverage',
   'Schedule',
   'Slot',
-  'Questionnaire',
+  // 'Questionnaire',
 ];
 
 /** Default maximum resources per Phase 1 Transaction Bundle */
