@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   ChevronRight,
   RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import { Topbar } from '../components/layout/Topbar';
 import { Button } from '../components/ui/Button';
@@ -19,7 +20,7 @@ import { useServerStore } from '../store/serverStore';
 import { useMigrationStore } from '../store/migrationStore';
 import { useMappingStore } from '../store/mappingStore';
 import { runDirectMigration, resumeDirectMigration } from '../services/migrationOrchestrator';
-import { listIncompleteCheckpoints } from '../services/checkpointService';
+import { listIncompleteCheckpoints, deleteCheckpoint } from '../services/checkpointService';
 import { MIGRATABLE_RESOURCE_TYPES, type FhirResourceType } from '../types/fhir';
 import { computeOverallProgress, type CheckpointSummary } from '../types/migration';
 import { generateReport, formatReportText } from '../services/reporter';
@@ -122,6 +123,15 @@ export function DirectMigration() {
     }
   }, [source, target]);
 
+  const handleDeleteCheckpoint = useCallback(async (jobId: string) => {
+    if (window.confirm(`Are you sure you want to delete the checkpoint for job ${jobId}? This cannot be undone.`)) {
+      await deleteCheckpoint(jobId);
+      listIncompleteCheckpoints()
+        .then((cps) => setIncompleteCheckpoints(cps))
+        .catch(() => setIncompleteCheckpoints([]));
+    }
+  }, []);
+
   const handlePause = () => {
     if (job?.status === 'paused') {
       updateStatus('downloading');
@@ -202,15 +212,26 @@ export function DirectMigration() {
                   {cp.sourceUrl} → {cp.targetUrl}
                 </span>
               </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => handleResume(cp.jobId)}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
-              >
-                <RotateCcw size={14} />
-                Resume
-              </Button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => handleResume(cp.jobId)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  <RotateCcw size={14} />
+                  Resume
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => handleDeleteCheckpoint(cp.jobId)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  <Trash2 size={14} />
+                  Delete
+                </Button>
+              </div>
             </div>
           ))}
         </div>
