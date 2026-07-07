@@ -59,6 +59,54 @@ export interface MigrationReport {
   error?: string;
 }
 
+/**
+ * Checkpoint persisted to disk after each successful bundle upload.
+ * Used to resume a migration after an app crash or server disconnection.
+ *
+ * File location: {AppLocalData}/checkpoints/{jobId}.json
+ */
+export interface MigrationCheckpoint {
+  /** Schema version — bump if the shape changes incompatibly */
+  version: 1;
+  jobId: string;
+  startedAt: string;
+  /** Base URL of the source FHIR server (for display purposes on resume) */
+  sourceUrl: string;
+  /** Base URL of the target FHIR server (for display purposes on resume) */
+  targetUrl: string;
+  /** Current phase — updated as migration progresses */
+  phase: 'phase1' | 'phase1b' | 'phase2' | 'done';
+  phase1: {
+    /** Resource types that have been fully uploaded (all batches successful) */
+    completedResourceTypes: FhirResourceType[];
+    /** True once Phase 1b (Patient.link.other restore) has completed */
+    patientLinkPatched: boolean;
+  };
+  phase2: {
+    /** Encounter IDs that have been successfully uploaded */
+    completedEncounterIds: string[];
+  };
+  /**
+   * All known ID mappings — both user-defined (Practitioner/Location/
+   * HealthcareService/Organization) and server-assigned (Patient/Schedule/Slot/…).
+   * Format: { "Patient/100": "Patient/987", "HealthcareService/6301787": "HealthcareService/105" }
+   */
+  idMappings: Record<string, string>;
+}
+
+/** Summary shown in the UI "Resume Migration" list */
+export interface CheckpointSummary {
+  jobId: string;
+  startedAt: string;
+  sourceUrl: string;
+  targetUrl: string;
+  phase: MigrationCheckpoint['phase'];
+  completedPhase1Types: number;
+  completedEncounters: number;
+  totalMappings: number;
+}
+
+
 export function createDefaultJob(
   mode: MigrationMode,
   resourceTypes: FhirResourceType[],

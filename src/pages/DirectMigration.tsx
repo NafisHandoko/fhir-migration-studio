@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   ChevronRight,
+  RotateCcw,
 } from 'lucide-react';
 import { Topbar } from '../components/layout/Topbar';
 import { Button } from '../components/ui/Button';
@@ -17,9 +18,10 @@ import { Card } from '../components/ui/Card';
 import { useServerStore } from '../store/serverStore';
 import { useMigrationStore } from '../store/migrationStore';
 import { useMappingStore } from '../store/mappingStore';
-import { runDirectMigration } from '../services/migrationOrchestrator';
+import { runDirectMigration, resumeDirectMigration } from '../services/migrationOrchestrator';
+import { listIncompleteCheckpoints } from '../services/checkpointService';
 import { MIGRATABLE_RESOURCE_TYPES, type FhirResourceType } from '../types/fhir';
-import { computeOverallProgress } from '../types/migration';
+import { computeOverallProgress, type CheckpointSummary } from '../types/migration';
 import { generateReport, formatReportText } from '../services/reporter';
 
 type Step = 'configure' | 'running' | 'done';
@@ -41,15 +43,26 @@ export function DirectMigration() {
     new Set(MIGRATABLE_RESOURCE_TYPES),
   );
   const [running, setRunning] = useState(false);
+  const [incompleteCheckpoints, setIncompleteCheckpoints] = useState<CheckpointSummary[]>([]);
   void running;
+
+  // Load any incomplete checkpoints on mount
+  useEffect(() => {
+    listIncompleteCheckpoints()
+      .then((cps) => setIncompleteCheckpoints(cps))
+      .catch(() => setIncompleteCheckpoints([]));
+  }, []);
 
   // Sync step state with the active job if one is running or completed
   useEffect(() => {
     if (job) {
       if (job.status === 'done' || job.status === 'error') {
         setStep('done');
+        // Refresh checkpoint list — completed migrations delete their checkpoint
+        listIncompleteCheckpoints().then(setIncompleteCheckpoints).catch(() => {});
       } else if (job.status === 'cancelled' || job.status === 'idle') {
         setStep('configure');
+        listIncompleteCheckpoints().then(setIncompleteCheckpoints).catch(() => {});
       } else {
         setStep('running');
       }
@@ -98,6 +111,17 @@ export function DirectMigration() {
     }
   }, [source, target, selected, rules]);
 
+  const handleResume = useCallback(async (jobId: string) => {
+    setRunning(true);
+    setStep('running');
+    try {
+      await resumeDirectMigration(jobId, { source, target });
+    } finally {
+      setRunning(false);
+      setStep('done');
+    }
+  }, [source, target]);
+
   const handlePause = () => {
     if (job?.status === 'paused') {
       updateStatus('downloading');
@@ -133,6 +157,61 @@ export function DirectMigration() {
         title="Direct Migration"
         subtitle="Migrate FHIR resources directly from source to target server"
       />
+
+      {/* Resume banner — shown when there are incomplete checkpoints */}
+      {step === 'configure' && incompleteCheckpoints.length > 0 && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(251,191,36,0.12), rgba(245,158,11,0.08))',
+          border: '1px solid rgba(251,191,36,0.35)',
+          borderRadius: 12,
+          padding: '16px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={18} style={{ color: '#f59e0b', flexShrink: 0 }} />
+            <span style={{ fontWeight: 600, color: '#f59e0b', fontSize: 14 }}>
+              Incomplete migration{incompleteCheckpoints.length > 1 ? 's' : ''} detected
+            </span>
+          </div>
+          {incompleteCheckpoints.map((cp) => (
+            <div key={cp.jobId} style={{
+              background: 'rgba(0,0,0,0.15)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexWrap: 'wrap',
+            }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={{ fontWeight: 600, fontSize: 13, fontFamily: 'monospace' }}>{cp.jobId}</span>
+                <span style={{ fontSize: 12, opacity: 0.7 }}>
+                  Started: {new Date(cp.startedAt).toLocaleString()} &nbsp;·&nbsp;
+                  Phase: {cp.phase} &nbsp;·&nbsp;
+                  Phase 1: {cp.completedPhase1Types} types &nbsp;·&nbsp;
+                  Phase 2: {cp.completedEncounters} encounters &nbsp;·&nbsp;
+                  {cp.totalMappings} mappings saved
+                </span>
+                <span style={{ fontSize: 11, opacity: 0.55 }}>
+                  {cp.sourceUrl} → {cp.targetUrl}
+                </span>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => handleResume(cp.jobId)}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
+              >
+                <RotateCcw size={14} />
+                Resume
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Step indicator */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 4 }}>

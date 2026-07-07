@@ -30,9 +30,15 @@
 import { downloadResourceType } from './downloader';
 import { buildEpisodeBundle, buildInternalUuidMap } from './bundleBuilder';
 import { uploadSingleBundle } from './uploader';
+import {
+  saveCheckpoint,
+  checkpointWithEncounter,
+  isEncounterComplete,
+} from './checkpointService';
 import { log } from '../store/logStore';
 import { useMigrationStore } from '../store/migrationStore';
 import type { ResourceMappingService } from './resourceMappingService';
+import type { MigrationCheckpoint } from '../types/migration';
 import type { ServerConfig } from '../types/server';
 import type { FhirResource, FhirResourceType } from '../types/fhir';
 
@@ -104,12 +110,18 @@ export interface EpisodeBundleResult {
  * Downloads all clinical resource types, groups them by Encounter, builds and
  * uploads one Transaction Bundle per Encounter, and yields a result per episode.
  *
+ * Supports resume: Encounters listed in `checkpoint.phase2.completedEncounterIds`
+ * are skipped entirely. After each successful upload the checkpoint is updated
+ * and saved to disk.
+ *
  * This is an async generator so the orchestrator can report progress
  * incrementally and abort if cancelled.
  */
 export async function* migrateClinicalEpisodes(
   options: ClinicalMigratorOptions,
   mappingService: ResourceMappingService,
+  checkpoint: MigrationCheckpoint,
+  onCheckpoint: (updated: MigrationCheckpoint) => void,
   checkStatus: () => Promise<boolean>,
 ): AsyncGenerator<EpisodeBundleResult> {
   const { source, target, jobId } = options;
@@ -179,6 +191,17 @@ export async function* migrateClinicalEpisodes(
 
     const encounterId = encounter.id ?? 'unknown';
 
+    // Skip Encounters already completed in a previous (resumed) run
+    if (isEncounterComplete(checkpoint, encounterId)) {
+      log({
+        level: 'info',
+        message: `[Phase 2] Encounter/${encounterId}: already completed (checkpoint) — skipping`,
+        jobId,
+      });
+      yield { encounterId, success: 0, failed: 0, errors: [] };
+      continue;
+    }
+
     // Collect Appointment for this Encounter (if not yet uploaded)
     const appointmentRef = extractAppointmentRef(encounter);
     const appointmentId = appointmentRef ? appointmentRef.split('/')[1] : undefined;
@@ -222,8 +245,6 @@ export async function* migrateClinicalEpisodes(
     const result = await uploadEpisodeBundle(bundle, encounterId, target, jobId);
 
     // Register any new IDs from the response (e.g. Encounter itself for future cross-refs)
-    // Note: For episodes, the mapping is mostly for diagnostic purposes since clinical
-    // resources don't cross bundle boundaries. We still register them for completeness.
     if (result.success > 0) {
       const originalRefs = episodeResources.map((r) =>
         r.id ? `${r.resourceType}/${r.id}` : '',
@@ -232,6 +253,11 @@ export async function* migrateClinicalEpisodes(
       if (responseEntries.length > 0) {
         mappingService.registerResponseMappings(originalRefs, responseEntries);
       }
+
+      // Persist this Encounter as completed in the checkpoint
+      checkpoint = checkpointWithEncounter(checkpoint, encounterId);
+      onCheckpoint(checkpoint);
+      await saveCheckpoint(checkpoint);
     }
 
     yield result;

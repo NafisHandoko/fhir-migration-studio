@@ -11,16 +11,25 @@
  *             PATCH each Patient to restore Patient.link.other using mapped IDs.
  *
  * After each successful bundle upload the server-assigned IDs are registered in
- * ResourceMappingService so Phase 2 can rewrite cross-bundle references.
+ * ResourceMappingService AND persisted to disk via CheckpointService so the
+ * migration can be resumed after a crash without creating duplicates.
  */
 
 import { downloadResourceType } from './downloader';
 import { buildSharedResourceBundle } from './bundleBuilder';
 import { rewriteResourceRefs } from './referenceRewriter';
 import { uploadSingleBundle } from './uploader';
+import {
+  saveCheckpoint,
+  checkpointWithMappings,
+  checkpointWithPhase1Type,
+  checkpointWithPatientLinkPatched,
+  isPhase1TypeComplete,
+} from './checkpointService';
 import { log } from '../store/logStore';
 import { useMigrationStore } from '../store/migrationStore';
 import type { ResourceMappingService } from './resourceMappingService';
+import type { MigrationCheckpoint } from '../types/migration';
 import type { ServerConfig } from '../types/server';
 import type { FhirResource, FhirResourceType } from '../types/fhir';
 
@@ -59,14 +68,19 @@ export interface SharedMigratorOptions {
  * Phase 1 entry point.
  * Downloads and uploads all shared resources, populating mappingService with
  * old→new ID mappings after each successful bundle upload.
+ * Checkpoint is saved to disk after each batch so the migration can be resumed.
  *
  * @param options        Source/target server configs and bundle size config
  * @param mappingService Central ID mapping store (mutated in-place)
+ * @param checkpoint     Current checkpoint state (mutated in-place via callbacks)
+ * @param onCheckpoint   Called with the updated checkpoint after each save
  * @param checkStatus    Returns false when the migration has been cancelled
  */
 export async function migrateSharedResources(
   options: SharedMigratorOptions,
   mappingService: ResourceMappingService,
+  checkpoint: MigrationCheckpoint,
+  onCheckpoint: (updated: MigrationCheckpoint) => void,
   checkStatus: () => Promise<boolean>,
 ): Promise<void> {
   const { source, target, bundleSize = DEFAULT_SHARED_BUNDLE_SIZE, jobId } = options;
@@ -78,6 +92,27 @@ export async function migrateSharedResources(
 
   for (const resourceType of SHARED_RESOURCE_TYPES) {
     if (!(await checkStatus())) return;
+
+    // Skip resource types already completed in a previous (resumed) run
+    if (isPhase1TypeComplete(checkpoint, resourceType)) {
+      log({
+        level: 'info',
+        message: `[Phase 1] Skipping ${resourceType} (already completed in checkpoint)`,
+        resourceType,
+        jobId,
+      });
+      // Still need patient resources for Phase 1b — download but don't upload
+      if (resourceType === 'Patient') {
+        await downloadResourceType(source, resourceType, {
+          onPage: (page) => { patientResources.push(...page); },
+          shouldContinue: () => {
+            const s = useMigrationStore.getState().current?.status;
+            return s !== 'cancelled' && s !== 'paused';
+          },
+        });
+      }
+      continue;
+    }
 
     log({ level: 'info', message: `[Phase 1] Downloading ${resourceType}...`, resourceType, jobId });
 
@@ -104,44 +139,69 @@ export async function migrateSharedResources(
       // Defer Patient upload — we need to strip link.other first
       patientResources.push(...resources);
     } else {
-      await uploadSharedBatch(resources, resourceType, bundleSize, target, mappingService, jobId, checkStatus);
+      checkpoint = await uploadSharedBatch(
+        resources, resourceType, bundleSize, target, mappingService, checkpoint, onCheckpoint, jobId, checkStatus,
+      );
     }
 
     if (!(await checkStatus())) return;
+
+    // Mark resource type as fully completed and save checkpoint
+    if (!isPhase1TypeComplete(checkpoint, resourceType)) {
+      checkpoint = checkpointWithPhase1Type(checkpoint, resourceType);
+      onCheckpoint(checkpoint);
+      await saveCheckpoint(checkpoint);
+    }
   }
 
   // -------------------------------------------------------------------------
   // Step 1a (continued): Upload Patients WITHOUT Patient.link.other
   // -------------------------------------------------------------------------
-  log({
-    level: 'info',
-    message: `[Phase 1a] Uploading ${patientResources.length} Patients (without link.other)...`,
-    resourceType: 'Patient',
-    jobId,
-  });
+  if (!isPhase1TypeComplete(checkpoint, 'Patient')) {
+    log({
+      level: 'info',
+      message: `[Phase 1a] Uploading ${patientResources.length} Patients (without link.other)...`,
+      resourceType: 'Patient',
+      jobId,
+    });
 
-  await uploadSharedBatch(
-    patientResources,
-    'Patient',
-    bundleSize,
-    target,
-    mappingService,
-    jobId,
-    checkStatus,
-    ['link'], // strip Patient.link entirely so link.other is absent
-  );
+    checkpoint = await uploadSharedBatch(
+      patientResources,
+      'Patient',
+      bundleSize,
+      target,
+      mappingService,
+      checkpoint,
+      onCheckpoint,
+      jobId,
+      checkStatus,
+      ['link'], // strip Patient.link entirely so link.other is absent
+    );
+
+    checkpoint = checkpointWithPhase1Type(checkpoint, 'Patient');
+    onCheckpoint(checkpoint);
+    await saveCheckpoint(checkpoint);
+  }
 
   if (!(await checkStatus())) return;
 
   // -------------------------------------------------------------------------
   // Step 1b: Restore Patient.link.other using the now-available ID mappings
   // -------------------------------------------------------------------------
+  if (checkpoint.phase1.patientLinkPatched) {
+    log({ level: 'info', message: '[Phase 1b] Patient link.other already patched (checkpoint) — skipping', jobId });
+    return;
+  }
+
   const patientsWithLinks = patientResources.filter(
     (p) => Array.isArray((p as Record<string, unknown>).link),
   );
 
   if (patientsWithLinks.length === 0) {
     log({ level: 'info', message: '[Phase 1b] No Patients have link.other — skipping patch step', jobId });
+    checkpoint = checkpointWithPatientLinkPatched(checkpoint);
+    onCheckpoint(checkpoint);
+    await saveCheckpoint(checkpoint);
     return;
   }
 
@@ -154,6 +214,10 @@ export async function migrateSharedResources(
 
   useMigrationStore.getState().updateStatus('patching');
   await patchPatientLinks(patientsWithLinks, target, mappingService, jobId);
+
+  checkpoint = checkpointWithPatientLinkPatched(checkpoint);
+  onCheckpoint(checkpoint);
+  await saveCheckpoint(checkpoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +226,8 @@ export async function migrateSharedResources(
 
 /**
  * Split resources into batches of bundleSize, build a Transaction Bundle for each,
- * upload it, and register the old→new ID mappings in mappingService.
+ * upload it, register the old→new ID mappings, and save a checkpoint after each batch.
+ * Returns the updated checkpoint.
  */
 async function uploadSharedBatch(
   resources: FhirResource[],
@@ -170,10 +235,12 @@ async function uploadSharedBatch(
   bundleSize: number,
   target: ServerConfig,
   mappingService: ResourceMappingService,
+  checkpoint: MigrationCheckpoint,
+  onCheckpoint: (updated: MigrationCheckpoint) => void,
   jobId: string,
   checkStatus: () => Promise<boolean>,
   stripFields: string[] = [],
-): Promise<void> {
+): Promise<MigrationCheckpoint> {
   const batches: FhirResource[][] = [];
   for (let i = 0; i < resources.length; i += bundleSize) {
     batches.push(resources.slice(i, i + bundleSize));
@@ -183,7 +250,7 @@ async function uploadSharedBatch(
   let totalFailed = 0;
 
   for (let i = 0; i < batches.length; i++) {
-    if (!(await checkStatus())) return;
+    if (!(await checkStatus())) return checkpoint;
 
     const batch = batches[i];
 
@@ -206,8 +273,20 @@ async function uploadSharedBatch(
       const responseBundle = await uploadSingleBundle(target, bundle);
       const entries = responseBundle.entry ?? [];
 
-      // Register new server-assigned IDs
+      // Register new server-assigned IDs in memory
       mappingService.registerResponseMappings(originalRefs, entries);
+
+      // Build a plain-object diff of only the NEW mappings from this batch
+      const newMappings: Record<string, string> = {};
+      for (let j = 0; j < originalRefs.length; j++) {
+        const newRef = mappingService.get(originalRefs[j]);
+        if (newRef) newMappings[originalRefs[j]] = newRef;
+      }
+
+      // Persist to checkpoint
+      checkpoint = checkpointWithMappings(checkpoint, newMappings);
+      onCheckpoint(checkpoint);
+      await saveCheckpoint(checkpoint);
 
       // Count results
       let success = 0;
@@ -244,6 +323,8 @@ async function uploadSharedBatch(
       });
     }
   }
+
+  return checkpoint;
 }
 
 /**
