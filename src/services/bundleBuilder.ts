@@ -31,6 +31,12 @@ import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
  */
 export const MAX_REQUEST_SIZE_BYTES = 7 * 1024 * 1024;
 
+/**
+ * Maximum number of resources allowed per Transaction Bundle.
+ * This helps prevent Gateway Timeout (504) on the server side when processing too many resources at once.
+ */
+export const MAX_BUNDLE_RESOURCE_COUNT = 500;
+
 const encoder = new TextEncoder();
 
 /**
@@ -110,7 +116,7 @@ export function buildTransactionBundles(
     const candidateBundle = buildTransactionBundle(candidateBatch);
     const size = calculateSerializedSize(candidateBundle);
 
-    if (currentBatch.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+    if (currentBatch.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatch.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
       bundles.push(buildTransactionBundle(currentBatch));
       currentBatch = [resource];
     } else {

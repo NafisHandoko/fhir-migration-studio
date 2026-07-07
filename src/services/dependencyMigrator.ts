@@ -30,7 +30,7 @@
  */
 
 import { downloadResourceType } from './downloader';
-import { buildResourceTypeBundle, calculateSerializedSize, MAX_REQUEST_SIZE_BYTES } from './bundleBuilder';
+import { buildResourceTypeBundle, calculateSerializedSize, MAX_REQUEST_SIZE_BYTES, MAX_BUNDLE_RESOURCE_COUNT } from './bundleBuilder';
 import { rewriteResourceRefs } from './referenceRewriter';
 import { uploadSingleBundle } from './uploader';
 import {
@@ -56,7 +56,7 @@ import type { FhirResource, FhirResourceType } from '../types/fhir';
  * Default maximum resources per Transaction Bundle.
  * Per docs/FHIR_RULES.md: configurable, default 100.
  */
-export const DEFAULT_BUNDLE_SIZE = 100;
+export const DEFAULT_BUNDLE_SIZE = 500;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -270,7 +270,6 @@ async function uploadResourceTypeBatches(
   stripFields: string[] = [],
 ): Promise<MigrationCheckpoint> {
   if (resources.length === 0) return checkpoint;
-  void bundleSize;
 
   let totalUploaded = 0;
   let totalFailed = 0;
@@ -291,7 +290,7 @@ async function uploadResourceTypeBatches(
       const { bundle } = buildResourceTypeBundle(candidateBatch, stripFields);
       const size = calculateSerializedSize(bundle);
 
-      if (currentBatchResources.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+      if (currentBatchResources.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchResources.length >= bundleSize)) {
         break;
       }
 
@@ -485,7 +484,7 @@ async function restorePatientLinks(
 
         const size = calculateSerializedSize(patchBundle);
 
-        if (currentBatchEntries.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+        if (currentBatchEntries.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchEntries.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
           break;
         }
 
