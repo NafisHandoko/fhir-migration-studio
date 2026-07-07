@@ -172,6 +172,7 @@ export function createCheckpoint(
     selectedResourceTypes,
     completedResourceTypes: [],
     patientLinkPatched: false,
+    compositionRelatesToPatched: false,
     idMappings: { ...userDefinedMappings },
   };
 }
@@ -202,6 +203,11 @@ export function checkpointWithCompletedType(
 /** Mark the Patient.link.other restore step as completed. */
 export function checkpointWithPatientLinkPatched(checkpoint: MigrationCheckpoint): MigrationCheckpoint {
   return { ...checkpoint, patientLinkPatched: true };
+}
+
+/** Mark the Composition.relatesTo restore step as completed. */
+export function checkpointWithCompositionRelatesToPatched(checkpoint: MigrationCheckpoint): MigrationCheckpoint {
+  return { ...checkpoint, compositionRelatesToPatched: true };
 }
 
 /** Mark the migration as fully done (used before deletion). */

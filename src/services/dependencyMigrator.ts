@@ -38,6 +38,7 @@ import {
   checkpointWithMappings,
   checkpointWithCompletedType,
   checkpointWithPatientLinkPatched,
+  checkpointWithCompositionRelatesToPatched,
   isResourceTypeComplete,
 } from './checkpointService';
 import { DEPENDENCY_ORDER, sortByDependencyOrder } from './dependencyGraph';
@@ -111,6 +112,8 @@ export async function runDependencyMigration(
 
   // Keep Patients in memory for the Patient.link.other restoration step
   let patientResources: FhirResource[] = [];
+  // Keep Compositions in memory for the Composition.relatesTo restoration step
+  let compositionResources: FhirResource[] = [];
 
   for (const resourceType of orderedTypes) {
     if (!(await checkStatus())) return checkpoint;
@@ -127,6 +130,11 @@ export async function runDependencyMigration(
       // Still need patient resources for the link.other step — download but don't upload
       if (resourceType === 'Patient' && !checkpoint.patientLinkPatched) {
         patientResources = await downloadAllResources(source, resourceType, jobId);
+      }
+
+      // Still need Composition resources for the relatesTo step — download but don't upload
+      if (resourceType === 'Composition' && !checkpoint.compositionRelatesToPatched) {
+        compositionResources = await downloadAllResources(source, resourceType, jobId);
       }
 
       continue;
@@ -168,6 +176,21 @@ export async function runDependencyMigration(
         checkStatus,
         ['link'], // strip Patient.link to remove link.other
       );
+    } else if (resourceType === 'Composition') {
+      // Stage 1: Upload Compositions WITHOUT relatesTo
+      compositionResources = resources;
+      checkpoint = await uploadResourceTypeBatches(
+        resources,
+        resourceType,
+        bundleSize,
+        target,
+        mappingService,
+        checkpoint,
+        onCheckpoint,
+        jobId,
+        checkStatus,
+        ['relatesTo'], // strip Composition.relatesTo
+      );
     } else {
       // Normal upload: rewrite references then upload
       checkpoint = await uploadResourceTypeBatches(
@@ -207,6 +230,23 @@ export async function runDependencyMigration(
   ) {
     checkpoint = await restorePatientLinks(
       patientResources,
+      target,
+      mappingService,
+      checkpoint,
+      onCheckpoint,
+      jobId,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Composition Stage 2: Restore Composition.relatesTo
+  // ---------------------------------------------------------------------------
+  if (
+    selectedResourceTypes.includes('Composition') &&
+    !checkpoint.compositionRelatesToPatched
+  ) {
+    checkpoint = await restoreCompositionRelatesTo(
+      compositionResources,
       target,
       mappingService,
       checkpoint,
@@ -521,6 +561,158 @@ async function restorePatientLinks(
   }
 
   checkpoint = checkpointWithPatientLinkPatched(checkpoint);
+  onCheckpoint(checkpoint);
+  await saveCheckpoint(checkpoint);
+  return checkpoint;
+}
+
+/**
+ * Composition Stage 2 — restore Composition.relatesTo.
+ *
+ * After ALL Compositions (and other resource types) have been uploaded (Stage 1),
+ * send a Transaction Bundle of PUT entries to restore each Composition's relatesTo
+ * references using the destination Composition IDs from ResourceMappingService.
+ */
+async function restoreCompositionRelatesTo(
+  compositions: FhirResource[],
+  target: ServerConfig,
+  mappingService: ResourceMappingService,
+  checkpoint: MigrationCheckpoint,
+  onCheckpoint: (updated: MigrationCheckpoint) => void,
+  jobId: string,
+): Promise<MigrationCheckpoint> {
+  if (checkpoint.compositionRelatesToPatched) {
+    log({
+      level: 'info',
+      message: '[Migration] Composition relatesTo already restored (checkpoint) — skipping',
+      jobId,
+    });
+    return checkpoint;
+  }
+
+  const compositionsWithRelatesTo = compositions.filter(
+    (c) => Array.isArray((c as Record<string, unknown>).relatesTo),
+  );
+
+  if (compositionsWithRelatesTo.length === 0) {
+    log({
+      level: 'info',
+      message: '[Migration] No Compositions have relatesTo — skipping restore step',
+      jobId,
+    });
+    checkpoint = checkpointWithCompositionRelatesToPatched(checkpoint);
+    onCheckpoint(checkpoint);
+    await saveCheckpoint(checkpoint);
+    return checkpoint;
+  }
+
+  log({
+    level: 'info',
+    message: `[Migration] Restoring relatesTo for ${compositionsWithRelatesTo.length} Compositions...`,
+    resourceType: 'Composition',
+    jobId,
+  });
+
+  useMigrationStore.getState().updateStatus('patching');
+
+  const { fhirClient } = await import('./fhirClient');
+  const { generateUrn } = await import('./bundleBuilder');
+
+  const MIGRATION_MARKER = {
+    url: 'https://ehealth.co.id/terminology/initiator-component',
+    valueString: 'fhir-migration-tool',
+  };
+
+  const entries = compositionsWithRelatesTo.map((composition) => {
+    const newRef = composition.id ? mappingService.get(`Composition/${composition.id}`) : undefined;
+    if (!newRef) return null; // Composition wasn't successfully uploaded — skip
+
+    const newId = newRef.split('/')[1];
+
+    // Rewrite relatesTo references using the mapping
+    const rewritten = rewriteResourceRefs(composition, mappingService.getMap());
+    const { id: _id, resourceType: _rt, meta, ...rest } = rewritten;
+    void _id;
+    void _rt;
+
+    // Inline meta cleaning: strip versionId/lastUpdated, inject migration marker
+    const { versionId: _v, lastUpdated: _l, ...metaRest } =
+      (meta ?? {}) as NonNullable<FhirResource['meta']>;
+    void _v; void _l;
+    const metaCleaned = {
+      ...metaRest,
+      extension: [...(metaRest.extension ?? []), MIGRATION_MARKER],
+    };
+
+    return {
+      fullUrl: generateUrn(),
+      resource: { resourceType: 'Composition' as const, id: newId, ...rest, meta: metaCleaned } as FhirResource,
+      request: { method: 'PUT' as const, url: `Composition/${newId}` },
+    };
+  }).filter((e): e is NonNullable<typeof e> => e !== null);
+
+  if (entries.length === 0) {
+    log({
+      level: 'warn',
+      message: '[Migration] No Compositions could be patched (mapping missing)',
+      jobId,
+    });
+  } else {
+    let nextEntryIndex = 0;
+    let batchIndex = 0;
+
+    while (nextEntryIndex < entries.length) {
+      const currentBatchEntries: typeof entries = [];
+
+      while (nextEntryIndex < entries.length) {
+        const entry = entries[nextEntryIndex];
+        const candidateEntries = [...currentBatchEntries, entry];
+
+        const patchBundle = {
+          resourceType: 'Bundle' as const,
+          type: 'transaction' as const,
+          entry: candidateEntries,
+        };
+
+        const size = calculateSerializedSize(patchBundle);
+
+        if (currentBatchEntries.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchEntries.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
+          break;
+        }
+
+        currentBatchEntries.push(entry);
+        nextEntryIndex++;
+      }
+
+      const patchBundle = {
+        resourceType: 'Bundle' as const,
+        type: 'transaction' as const,
+        entry: currentBatchEntries,
+      };
+
+      try {
+        await fhirClient.post(target, '/', patchBundle);
+        log({
+          level: 'success',
+          message: `[Migration] Restored relatesTo for batch ${batchIndex + 1} (${currentBatchEntries.length} Compositions)`,
+          resourceType: 'Composition',
+          jobId,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log({
+          level: 'error',
+          message: `[Migration] Composition relatesTo restore batch ${batchIndex + 1} failed: ${msg}`,
+          resourceType: 'Composition',
+          jobId,
+        });
+      }
+
+      batchIndex++;
+    }
+  }
+
+  checkpoint = checkpointWithCompositionRelatesToPatched(checkpoint);
   onCheckpoint(checkpoint);
   await saveCheckpoint(checkpoint);
   return checkpoint;

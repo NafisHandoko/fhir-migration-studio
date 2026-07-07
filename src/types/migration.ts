@@ -92,6 +92,10 @@ export interface MigrationCheckpoint {
    */
   patientLinkPatched: boolean;
   /**
+   * True once the Composition.relatesTo restore step (PUT) has completed.
+   */
+  compositionRelatesToPatched: boolean;
+  /**
    * All known ID mappings — both user-defined (Practitioner/Location/
    * HealthcareService/Organization) and server-assigned (Patient/Coverage/…).
    * Format: { "Patient/100": "Patient/987", "HealthcareService/6301787": "HealthcareService/105" }
