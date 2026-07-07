@@ -30,7 +30,7 @@
  */
 
 import { downloadResourceType } from './downloader';
-import { buildResourceTypeBundle } from './bundleBuilder';
+import { buildResourceTypeBundle, calculateSerializedSize, MAX_REQUEST_SIZE_BYTES } from './bundleBuilder';
 import { rewriteResourceRefs } from './referenceRewriter';
 import { uploadSingleBundle } from './uploader';
 import {
@@ -270,30 +270,41 @@ async function uploadResourceTypeBatches(
   stripFields: string[] = [],
 ): Promise<MigrationCheckpoint> {
   if (resources.length === 0) return checkpoint;
-
-  const batches: FhirResource[][] = [];
-  for (let i = 0; i < resources.length; i += bundleSize) {
-    batches.push(resources.slice(i, i + bundleSize));
-  }
+  void bundleSize;
 
   let totalUploaded = 0;
   let totalFailed = 0;
+  let nextResourceIndex = 0;
+  let batchIndex = 0;
 
-  for (let i = 0; i < batches.length; i++) {
+  while (nextResourceIndex < resources.length) {
     if (!(await checkStatus())) return checkpoint;
 
-    const batch = batches[i];
+    const currentBatchResources: FhirResource[] = [];
 
-    // Rewrite all references in each resource using the current mapping
-    // (includes manually-mapped Practitioner/Location/HealthcareService/Organization
-    //  plus any previously migrated resource types in this pipeline run)
-    const rewrittenBatch = batch.map((r) => rewriteResourceRefs(r, mappingService.getMap()));
+    while (nextResourceIndex < resources.length) {
+      const resource = resources[nextResourceIndex];
+      // Rewrite references based on current mapping state (which is updated after each batch upload)
+      const rewritten = rewriteResourceRefs(resource, mappingService.getMap());
+      
+      const candidateBatch = [...currentBatchResources, rewritten];
+      const { bundle } = buildResourceTypeBundle(candidateBatch, stripFields);
+      const size = calculateSerializedSize(bundle);
 
-    const { bundle, originalRefs } = buildResourceTypeBundle(rewrittenBatch, stripFields);
+      if (currentBatchResources.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+        break;
+      }
+
+      currentBatchResources.push(rewritten);
+      nextResourceIndex++;
+    }
+
+    const { bundle, originalRefs } = buildResourceTypeBundle(currentBatchResources, stripFields);
+    const currentBatchSize = currentBatchResources.length;
 
     log({
       level: 'info',
-      message: `[Migration] Uploading ${resourceType} bundle ${i + 1}/${batches.length} (${batch.length} resources)`,
+      message: `[Migration] Uploading ${resourceType} bundle ${batchIndex + 1} (${currentBatchSize} resources)`,
       resourceType,
       jobId,
     });
@@ -336,23 +347,25 @@ async function uploadResourceTypeBatches(
 
       log({
         level: failed > 0 ? 'warn' : 'success',
-        message: `[Migration] ${resourceType} bundle ${i + 1}/${batches.length}: ${success} ok, ${failed} failed`,
+        message: `[Migration] ${resourceType} bundle ${batchIndex + 1}: ${success} ok, ${failed} failed`,
         resourceType,
         jobId,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      totalFailed += batch.length;
+      totalFailed += currentBatchSize;
       useMigrationStore.getState().updateResourceProgress(resourceType, { failed: totalFailed });
       log({
         level: 'error',
-        message: `[Migration] ${resourceType} bundle ${i + 1}/${batches.length} failed: ${msg}`,
+        message: `[Migration] ${resourceType} bundle ${batchIndex + 1} failed: ${msg}`,
         resourceType,
         jobId,
       });
       // Bundle-level error: log and continue with next bundle (per FHIR_RULES.md §Retry Strategy:
       // each bundle is independently retryable — orchestrator may retry later via resume)
     }
+
+    batchIndex++;
   }
 
   return checkpoint;
@@ -454,28 +467,57 @@ async function restorePatientLinks(
       jobId,
     });
   } else {
-    const patchBundle = {
-      resourceType: 'Bundle' as const,
-      type: 'transaction' as const,
-      entry: entries,
-    };
+    let nextEntryIndex = 0;
+    let batchIndex = 0;
 
-    try {
-      await fhirClient.post(target, '/', patchBundle);
-      log({
-        level: 'success',
-        message: `[Migration] Restored link.other for ${entries.length} Patients`,
-        resourceType: 'Patient',
-        jobId,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log({
-        level: 'error',
-        message: `[Migration] Patient link.other restore failed: ${msg}`,
-        resourceType: 'Patient',
-        jobId,
-      });
+    while (nextEntryIndex < entries.length) {
+      const currentBatchEntries: typeof entries = [];
+
+      while (nextEntryIndex < entries.length) {
+        const entry = entries[nextEntryIndex];
+        const candidateEntries = [...currentBatchEntries, entry];
+        
+        const patchBundle = {
+          resourceType: 'Bundle' as const,
+          type: 'transaction' as const,
+          entry: candidateEntries,
+        };
+
+        const size = calculateSerializedSize(patchBundle);
+
+        if (currentBatchEntries.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+          break;
+        }
+
+        currentBatchEntries.push(entry);
+        nextEntryIndex++;
+      }
+
+      const patchBundle = {
+        resourceType: 'Bundle' as const,
+        type: 'transaction' as const,
+        entry: currentBatchEntries,
+      };
+
+      try {
+        await fhirClient.post(target, '/', patchBundle);
+        log({
+          level: 'success',
+          message: `[Migration] Restored link.other for batch ${batchIndex + 1} (${currentBatchEntries.length} Patients)`,
+          resourceType: 'Patient',
+          jobId,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log({
+          level: 'error',
+          message: `[Migration] Patient link.other restore batch ${batchIndex + 1} failed: ${msg}`,
+          resourceType: 'Patient',
+          jobId,
+        });
+      }
+
+      batchIndex++;
     }
   }
 

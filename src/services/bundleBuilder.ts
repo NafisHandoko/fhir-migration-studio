@@ -25,8 +25,20 @@ import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Maximum resources per batch for the simple (NDJSON import) path */
-const BUNDLE_BATCH_SIZE = 100000;
+/**
+ * Maximum request body size for FHIR Transaction Bundles (7 MB).
+ * Provides a 1 MB margin below the target ingress body size limit of 8 MB.
+ */
+export const MAX_REQUEST_SIZE_BYTES = 7 * 1024 * 1024;
+
+const encoder = new TextEncoder();
+
+/**
+ * Calculate the serialized size of a FHIR Bundle in bytes.
+ */
+export function calculateSerializedSize(bundle: Bundle): number {
+  return encoder.encode(JSON.stringify(bundle)).length;
+}
 
 /**
  * Extension stamped onto every resource sent to the target server.
@@ -36,10 +48,6 @@ const MIGRATION_MARKER: { url: string; valueString: string } = {
   url: 'https://ehealth.co.id/terminology/initiator-component',
   valueString: 'fhir-migration-tool',
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Generate a new urn:uuid identifier.
@@ -68,10 +76,6 @@ function cleanMeta(meta: FhirResource['meta']): FhirResource['meta'] {
   } as FhirResource['meta'];
 }
 
-// ---------------------------------------------------------------------------
-// 1. Simple builder (NDJSON import path)
-// ---------------------------------------------------------------------------
-
 /**
  * Builds a single FHIR Transaction Bundle from a list of resources.
  * Each resource gets a new random urn:uuid fullUrl and a POST request entry.
@@ -97,12 +101,27 @@ export function buildTransactionBundle(resources: FhirResource[]): Bundle {
  */
 export function buildTransactionBundles(
   resources: FhirResource[],
-  batchSize: number = BUNDLE_BATCH_SIZE,
 ): Bundle[] {
   const bundles: Bundle[] = [];
-  for (let i = 0; i < resources.length; i += batchSize) {
-    bundles.push(buildTransactionBundle(resources.slice(i, i + batchSize)));
+  let currentBatch: FhirResource[] = [];
+
+  for (const resource of resources) {
+    const candidateBatch = [...currentBatch, resource];
+    const candidateBundle = buildTransactionBundle(candidateBatch);
+    const size = calculateSerializedSize(candidateBundle);
+
+    if (currentBatch.length > 0 && size > MAX_REQUEST_SIZE_BYTES) {
+      bundles.push(buildTransactionBundle(currentBatch));
+      currentBatch = [resource];
+    } else {
+      currentBatch = candidateBatch;
+    }
   }
+
+  if (currentBatch.length > 0) {
+    bundles.push(buildTransactionBundle(currentBatch));
+  }
+
   return bundles;
 }
 
