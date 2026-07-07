@@ -140,9 +140,8 @@ export function DirectMigration() {
           <div key={s} style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <div
-                className={`step-dot ${
-                  step === s ? 'active' : i < (Object.keys(STEP_LABELS) as Step[]).indexOf(step) ? 'done' : 'pending'
-                }`}
+                className={`step-dot ${step === s ? 'active' : i < (Object.keys(STEP_LABELS) as Step[]).indexOf(step) ? 'done' : 'pending'
+                  }`}
               >
                 {i < (Object.keys(STEP_LABELS) as Step[]).indexOf(step) ? (
                   <CheckCircle2 size={12} />

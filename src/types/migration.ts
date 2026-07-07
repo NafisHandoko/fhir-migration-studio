@@ -10,6 +10,7 @@ export type MigrationStatus =
   | 'downloading'
   | 'mapping'
   | 'uploading'
+  | 'patching'     // Phase 1b: restoring Patient.link.other after all Patients are created
   | 'validating'
   | 'done'
   | 'error'

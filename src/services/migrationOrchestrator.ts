@@ -1,47 +1,96 @@
 /**
- * Migration orchestrator — coordinates the full migration pipeline:
- * Scan → Download ALL → Map → Build cross-referenced Bundle → Upload → Report
+ * Migration Orchestrator — coordinates the full two-phase migration pipeline.
  *
- * Key design: all resource types are downloaded first, then a SINGLE transaction
- * bundle is built containing every resource. Internal references (e.g. a Composition
- * referring to Patient/12345) are rewritten to the urn:uuid assigned to that Patient
- * entry in the same bundle, allowing the FHIR server to resolve them transactionally.
+ * Phase 1 — Shared Resources  (sharedResourceMigrator)
+ *   Downloads and uploads: Patient, Coverage, Schedule, Slot, Questionnaire.
+ *   After each bundle upload the server-assigned IDs are stored in
+ *   ResourceMappingService for use in Phase 2.
+ *   Patient.link.other is handled in two steps (Step 1a: create without links,
+ *   Step 1b: PUT to restore links after all Patient IDs are known).
  *
- * References to manually-mapped resources (Practitioner, Location, HealthcareService)
- * are rewritten by the mapper step using user-defined rules — those resources already
- * exist on the target server and are NOT included in the bundle.
+ * Phase 2 — Clinical Episodes  (clinicalEpisodeBuilder)
+ *   Downloads clinical resource types (Appointment, Encounter, Composition,
+ *   Condition, Observation, …) and groups them by Encounter.
+ *   One small Transaction Bundle is uploaded per Encounter.
+ *   References to shared resources are rewritten using ResourceMappingService.
+ *   References within the same bundle use urn:uuid.
+ *
+ * Manual Mapping (mapper)
+ *   Applied BEFORE Phase 1 & 2 to all resources.
+ *   Rewrites references to Practitioner, Location, HealthcareService, Organization
+ *   using user-defined rules (these resources already exist on the target server).
+ *
+ * See docs/FHIR_RULES.md for the full specification.
  */
 
 import { scanResourceCounts } from './scanner';
-import { downloadResourceType } from './downloader';
-import { rewriteReferences } from './mapper';
-import { buildUuidMap, buildCrossReferencedBundle } from './bundleBuilder';
-import { uploadSingleBundle } from './uploader';
+import { ResourceMappingService } from './resourceMappingService';
+import {
+  migrateSharedResources,
+  SHARED_RESOURCE_TYPES,
+  DEFAULT_SHARED_BUNDLE_SIZE,
+} from './sharedResourceMigrator';
+import {
+  migrateClinicalEpisodes,
+  CLINICAL_RESOURCE_TYPES,
+} from './clinicalEpisodeBuilder';
 import { log } from '../store/logStore';
 import { useMigrationStore } from '../store/migrationStore';
 import type { ServerConfig } from '../types/server';
-import type { FhirResourceType, FhirResource } from '../types/fhir';
+import type { FhirResourceType } from '../types/fhir';
 import type { MappingRule } from '../types/mapping';
 import { createDefaultJob } from '../types/migration';
 
-/** Resource types managed manually by the user — excluded from internal UUID mapping */
-const MANUALLY_MAPPED_TYPES = new Set<string>(['Practitioner', 'Location', 'HealthcareService']);
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Resource types that already exist on the target server and are referenced
+ * but NOT migrated. Their IDs are rewritten via user-defined MappingRules.
+ */
+const MANUALLY_MAPPED_TYPES = new Set<string>([
+  'Practitioner',
+  'Location',
+  'HealthcareService',
+  'Organization',
+]);
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 export interface MigrationOptions {
   source: ServerConfig;
   target: ServerConfig;
-  resourceTypes: FhirResourceType[];
+  /**
+   * Resource types to migrate.
+   * If omitted, all SHARED + CLINICAL types are migrated.
+   */
+  resourceTypes?: FhirResourceType[];
+  /** User-defined reference mapping rules (Practitioner, Location, HealthcareService) */
   mappingRules: MappingRule[];
+  /**
+   * Maximum number of resources per Phase 1 Transaction Bundle.
+   * Defaults to DEFAULT_SHARED_BUNDLE_SIZE (300).
+   */
+  bundleSize?: number;
 }
 
 /**
- * Run a full direct server-to-server migration.
- * Updates the Zustand migration store throughout.
+ * Run a full direct server-to-server migration using the two-phase strategy.
+ * Updates the Zustand migration store throughout so the UI stays in sync.
  */
 export async function runDirectMigration(options: MigrationOptions): Promise<void> {
-  const { source, target, resourceTypes, mappingRules } = options;
-  const store = useMigrationStore.getState();
+  const {
+    source,
+    target,
+    resourceTypes = [...SHARED_RESOURCE_TYPES, ...CLINICAL_RESOURCE_TYPES],
+    mappingRules,
+    bundleSize = DEFAULT_SHARED_BUNDLE_SIZE,
+  } = options;
 
+  const store = useMigrationStore.getState();
   const job = createDefaultJob('direct', resourceTypes);
   job.startedAt = new Date().toISOString();
   store.setJob(job);
@@ -49,17 +98,16 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
   log({ level: 'info', message: `Migration ${job.id} started`, jobId: job.id });
 
   try {
-    // Initialise all resource progress counters to 0 so they appear in the UI immediately
+    // Initialise progress counters
     for (const rt of resourceTypes) {
       useMigrationStore.getState().updateResourceProgress(rt, {
         total: 0, downloaded: 0, uploaded: 0, failed: 0, skipped: 0,
       });
     }
 
-    /**
-     * Check the current job status and optionally wait until resumed.
-     * Returns false when the job has been cancelled.
-     */
+    // -----------------------------------------------------------------------
+    // Shared state: check/wait for pause/cancel
+    // -----------------------------------------------------------------------
     const checkStatus = async (): Promise<boolean> => {
       let status = useMigrationStore.getState().current?.status;
       if (status === 'cancelled') return false;
@@ -72,7 +120,7 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
     };
 
     // -----------------------------------------------------------------------
-    // Phase 1: Scan — count resources per type
+    // Scan — count resources per type (UI feedback only)
     // -----------------------------------------------------------------------
     store.updateStatus('scanning');
     log({ level: 'info', message: 'Scanning source server...', jobId: job.id });
@@ -86,161 +134,98 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
       checkStatus,
     );
 
-    if (useMigrationStore.getState().current?.status === 'cancelled') {
+    if (!(await checkStatus())) {
       log({ level: 'warn', message: `Migration ${job.id} cancelled during scanning`, jobId: job.id });
       return;
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2: Download ALL resource types
-    //
-    // We accumulate all resources into a flat array and record the index range
-    // [start, start + count) for each resource type so we can attribute upload
-    // results back to individual types after the single-bundle upload.
+    // Central ID mapping service — populated by Phase 1, consumed by Phase 2
     // -----------------------------------------------------------------------
-    store.updateStatus('downloading');
-    log({ level: 'info', message: 'Downloading all resource types...', jobId: job.id });
+    const mappingService = new ResourceMappingService();
 
-    const allResources: FhirResource[] = [];
-    /** Records the slice of allResources that belongs to each resource type */
-    const typeRanges: Array<{ resourceType: FhirResourceType; start: number; count: number }> = [];
-
-    for (const resourceType of resourceTypes) {
-      if (!(await checkStatus())) break;
-
-      log({ level: 'info', message: `Downloading ${resourceType}...`, resourceType, jobId: job.id });
-
-      const startIdx = allResources.length;
-      const typeResources: FhirResource[] = [];
-
-      await downloadResourceType(source, resourceType, {
-        onPage: (resources, downloaded, total) => {
-          typeResources.push(...resources);
-          useMigrationStore.getState().updateResourceProgress(resourceType, { total, downloaded });
-        },
-        shouldContinue: () => {
-          const status = useMigrationStore.getState().current?.status;
-          return status !== 'cancelled' && status !== 'paused';
-        },
-      });
-
-      allResources.push(...typeResources);
-      typeRanges.push({ resourceType, start: startIdx, count: typeResources.length });
-
-      log({
-        level: 'info',
-        message: `Downloaded ${typeResources.length} ${resourceType} resources`,
-        resourceType,
-        jobId: job.id,
-      });
+    // Register user-defined manual mapping rules into the mapping service
+    // so Phase 2 reference rewriter can resolve Practitioner/Location/etc.
+    for (const rule of mappingRules) {
+      mappingService.set(
+        `${rule.resourceType}/${rule.sourceId}`,
+        `${rule.resourceType}/${rule.targetId}`,
+      );
     }
 
-    if (useMigrationStore.getState().current?.status === 'cancelled') {
-      log({ level: 'warn', message: `Migration ${job.id} cancelled during download`, jobId: job.id });
-      return;
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 3: Apply manual mapping rules to all resources
-    //
-    // This rewrites references to Practitioner/Location/HealthcareService using
-    // the user-defined rules (e.g. Practitioner/6301786 → Practitioner/ehealth-000004).
-    // These resources already exist on the target server and are NOT included in
-    // the migration bundle.
-    // -----------------------------------------------------------------------
-    store.updateStatus('mapping');
-    log({ level: 'info', message: 'Applying reference mapping rules...', jobId: job.id });
-
-    const manualMapped = mappingRules.length > 0
-      ? allResources.map((r) => rewriteReferences(r, mappingRules))
-      : allResources;
-
-    // -----------------------------------------------------------------------
-    // Phase 4: Build UUID map + cross-referenced transaction bundle
-    //
-    // For every migratable resource (non-manually-mapped type), assign a new
-    // urn:uuid. Then build ONE bundle where every internal cross-reference
-    // (e.g. Composition.subject.reference = "Patient/12345") is replaced with
-    // the urn:uuid assigned to that resource's bundle entry ("urn:uuid:abc…").
-    // -----------------------------------------------------------------------
-    log({ level: 'info', message: 'Building cross-referenced transaction bundle...', jobId: job.id });
-
-    const uuidMap = buildUuidMap(manualMapped, MANUALLY_MAPPED_TYPES);
-    const bundle = buildCrossReferencedBundle(manualMapped, uuidMap);
-
-    const totalResources = bundle.entry?.length ?? 0;
     log({
       level: 'info',
-      message: `Built bundle with ${totalResources} resources and ${uuidMap.size} internal references`,
+      message: `Loaded ${mappingRules.length} manual mapping rules into ResourceMappingService`,
       jobId: job.id,
     });
 
+    // -----------------------------------------------------------------------
+    // Phase 1 — Shared Resources
+    // -----------------------------------------------------------------------
+    store.updateStatus('uploading');
+    log({ level: 'info', message: '[Phase 1] Starting shared resource migration...', jobId: job.id });
+
+    await migrateSharedResources(
+      { source, target, bundleSize, jobId: job.id },
+      mappingService,
+      checkStatus,
+    );
+
     if (!(await checkStatus())) {
-      log({ level: 'warn', message: `Migration ${job.id} cancelled before upload`, jobId: job.id });
+      log({ level: 'warn', message: `Migration ${job.id} cancelled after Phase 1`, jobId: job.id });
       return;
     }
 
+    log({
+      level: 'success',
+      message: `[Phase 1] Complete. ${mappingService.size} ID mappings registered.`,
+      jobId: job.id,
+    });
+
     // -----------------------------------------------------------------------
-    // Phase 5: Upload the single bundle
+    // Phase 2 — Clinical Episodes
     // -----------------------------------------------------------------------
     store.updateStatus('uploading');
-    log({ level: 'info', message: `Uploading bundle (${totalResources} resources)...`, jobId: job.id });
+    log({ level: 'info', message: '[Phase 2] Starting clinical episode migration...', jobId: job.id });
 
-    const responseBundle = await uploadSingleBundle(target, bundle);
-
-    // -----------------------------------------------------------------------
-    // Phase 6: Parse response and attribute results per resource type
-    //
-    // The FHIR server returns one response entry per request entry, in the same
-    // order. We use the recorded typeRanges to slice the response entries and
-    // count successes/failures per type.
-    // -----------------------------------------------------------------------
-    const responseEntries = responseBundle.entry ?? [];
+    let totalEpisodes = 0;
     let totalSuccess = 0;
     let totalFailed = 0;
 
-    for (const { resourceType, start, count } of typeRanges) {
-      const typeEntries = responseEntries.slice(start, start + count);
-      let success = 0;
-      let failed = 0;
-      const errors: string[] = [];
+    const episodeGenerator = migrateClinicalEpisodes(
+      { source, target, jobId: job.id },
+      mappingService,
+      checkStatus,
+    );
 
-      for (const entry of typeEntries) {
-        const statusStr = entry.response?.status ?? '';
-        const code = parseInt(statusStr.split(' ')[0], 10);
-        if (code >= 200 && code < 300) {
-          success++;
-        } else {
-          failed++;
-          if (statusStr) errors.push(statusStr);
-        }
+    for await (const result of episodeGenerator) {
+      totalEpisodes++;
+      totalSuccess += result.success;
+      totalFailed += result.failed;
+
+      if (result.errors.length > 0) {
+        log({
+          level: 'warn',
+          message: `Encounter/${result.encounterId}: ${result.failed} failed entries`,
+          jobId: job.id,
+          detail: result.errors.slice(0, 5).join('\n'),
+        });
       }
 
-      useMigrationStore.getState().updateResourceProgress(resourceType, {
-        uploaded: success,
-        failed,
-      });
-
-      totalSuccess += success;
-      totalFailed += failed;
-
-      log({
-        level: failed > 0 ? 'warn' : 'success',
-        message: `${resourceType}: ${success} ok, ${failed} failed`,
-        resourceType,
-        jobId: job.id,
-        detail: errors.length > 0 ? errors.slice(0, 10).join('\n') : undefined,
-      });
+      if (!(await checkStatus())) {
+        log({ level: 'warn', message: `Migration ${job.id} cancelled during Phase 2`, jobId: job.id });
+        break;
+      }
     }
 
     log({
       level: totalFailed > 0 ? 'warn' : 'success',
-      message: `Upload complete: ${totalSuccess} ok, ${totalFailed} failed`,
+      message: `[Phase 2] Complete. ${totalEpisodes} episodes: ${totalSuccess} ok, ${totalFailed} failed`,
       jobId: job.id,
     });
 
     // -----------------------------------------------------------------------
-    // Phase 7: Complete
+    // Complete
     // -----------------------------------------------------------------------
     store.updateStatus('validating');
     await new Promise((r) => setTimeout(r, 500)); // brief UX pause
@@ -253,7 +238,11 @@ export async function runDirectMigration(options: MigrationOptions): Promise<voi
   }
 }
 
-/** Wait until migration is no longer paused or is cancelled */
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Wait until migration is no longer paused or is cancelled. */
 async function waitForResume(): Promise<void> {
   return new Promise((resolve) => {
     const interval = setInterval(() => {
@@ -265,3 +254,7 @@ async function waitForResume(): Promise<void> {
     }, 500);
   });
 }
+
+// Keep these re-exports for backward-compat with any UI code that imports them
+export { MANUALLY_MAPPED_TYPES };
+export type { MigrationOptions as DirectMigrationOptions };
