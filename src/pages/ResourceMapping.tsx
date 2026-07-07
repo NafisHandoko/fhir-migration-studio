@@ -100,7 +100,7 @@ export function ResourceMapping() {
         <Info size={15} />
         <div>
           <strong>How mapping works:</strong> When migrating resources from the old server, any reference
-          to a Practitioner, Location, or HealthcareService with the <em>Source ID</em> will be automatically
+          to a Practitioner, Location, HealthcareService, or Organization with the <em>Source ID</em> will be automatically
           rewritten to use the <em>Target ID</em> from your new server.
         </div>
       </div>
@@ -122,7 +122,7 @@ export function ResourceMapping() {
             <Info size={28} className="empty-state-icon" />
             <div className="empty-state-title">No mapping rules defined</div>
             <div className="empty-state-desc">
-              Add rules to rewrite Practitioner, Location, and HealthcareService references
+              Add rules to rewrite Practitioner, Location, HealthcareService, and Organization references
               from your source server IDs to the corresponding IDs on your target server.
             </div>
             <Button variant="primary" size="sm" icon={<Plus size={13} />} onClick={() => setShowAdd(true)}>

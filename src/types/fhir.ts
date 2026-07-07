@@ -24,7 +24,8 @@ export type FhirResourceType =
   | 'Slot'
   | 'Practitioner'
   | 'Location'
-  | 'HealthcareService';
+  | 'HealthcareService'
+  | 'Organization';
 
 export const MIGRATABLE_RESOURCE_TYPES: FhirResourceType[] = [
   'Patient',
@@ -51,6 +52,7 @@ export const REFERENCE_RESOURCE_TYPES: FhirResourceType[] = [
   'Practitioner',
   'Location',
   'HealthcareService',
+  'Organization',
 ];
 
 export interface Reference {

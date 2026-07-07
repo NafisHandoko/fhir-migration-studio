@@ -12,7 +12,7 @@
  * building each clinical episode Transaction Bundle.
  *
  * Includes the user-defined manual mapping rules (Practitioner, Location,
- * HealthcareService) that are loaded at the start of migration.
+ * HealthcareService, Organization) that are loaded at the start of migration.
  */
 
 export class ResourceMappingService {

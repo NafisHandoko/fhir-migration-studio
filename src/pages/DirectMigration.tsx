@@ -219,7 +219,7 @@ export function DirectMigration() {
             <CheckCircle2 size={16} />
             <span>
               {rules.length === 0
-                ? 'No reference mapping rules defined. References to Practitioner/Location/HealthcareService will be left as-is.'
+                ? 'No reference mapping rules defined. References to Practitioner/Location/HealthcareService/Organization will be left as-is.'
                 : `${rules.length} mapping rule${rules.length > 1 ? 's' : ''} will be applied to rewrite references.`}
               {' '}
               <button

@@ -59,6 +59,7 @@ export function FHIRExplorer() {
     'Practitioner',
     'Location',
     'HealthcareService',
+    'Organization',
   ];
 
   return (

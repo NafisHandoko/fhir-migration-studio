@@ -68,7 +68,7 @@ export interface MigrationOptions {
    * If omitted, all SHARED + CLINICAL types are migrated.
    */
   resourceTypes?: FhirResourceType[];
-  /** User-defined reference mapping rules (Practitioner, Location, HealthcareService) */
+  /** User-defined reference mapping rules (Practitioner, Location, HealthcareService, Organization) */
   mappingRules: MappingRule[];
   /**
    * Maximum number of resources per Phase 1 Transaction Bundle.

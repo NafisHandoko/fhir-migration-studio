@@ -10,12 +10,13 @@
 
 import type { FhirResourceType } from './fhir';
 
-export type MappableResourceType = 'Practitioner' | 'Location' | 'HealthcareService';
+export type MappableResourceType = 'Practitioner' | 'Location' | 'HealthcareService' | 'Organization';
 
 export const MAPPABLE_RESOURCE_TYPES: MappableResourceType[] = [
   'Practitioner',
   'Location',
   'HealthcareService',
+  'Organization',
 ];
 
 export interface MappingRule {
