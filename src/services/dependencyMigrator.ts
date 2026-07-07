@@ -57,7 +57,7 @@ import type { FhirResource, FhirResourceType } from '../types/fhir';
  * Default maximum resources per Transaction Bundle.
  * Per docs/FHIR_RULES.md: configurable, default 100.
  */
-export const DEFAULT_BUNDLE_SIZE = 500;
+export const DEFAULT_BUNDLE_SIZE = 200;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,7 +325,7 @@ async function uploadResourceTypeBatches(
       const resource = resources[nextResourceIndex];
       // Rewrite references based on current mapping state (which is updated after each batch upload)
       const rewritten = rewriteResourceRefs(resource, mappingService.getMap());
-      
+
       const candidateBatch = [...currentBatchResources, rewritten];
       const { bundle } = buildResourceTypeBundle(candidateBatch, stripFields);
       const size = calculateSerializedSize(bundle);
@@ -515,7 +515,7 @@ async function restorePatientLinks(
       while (nextEntryIndex < entries.length) {
         const entry = entries[nextEntryIndex];
         const candidateEntries = [...currentBatchEntries, entry];
-        
+
         const patchBundle = {
           resourceType: 'Bundle' as const,
           type: 'transaction' as const,
