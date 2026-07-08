@@ -29,13 +29,13 @@ import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
  * Maximum request body size for FHIR Transaction Bundles (7 MB).
  * Provides a 1 MB margin below the target ingress body size limit of 8 MB.
  */
-export const MAX_REQUEST_SIZE_BYTES = 5 * 1024 * 1024;
+export const MAX_REQUEST_SIZE_BYTES = 3 * 1024 * 1024;
 
 /**
  * Maximum number of resources allowed per Transaction Bundle.
  * This helps prevent Gateway Timeout (504) on the server side when processing too many resources at once.
  */
-export const MAX_BUNDLE_RESOURCE_COUNT = 200;
+export const MAX_BUNDLE_RESOURCE_COUNT = 100;
 
 const encoder = new TextEncoder();
 

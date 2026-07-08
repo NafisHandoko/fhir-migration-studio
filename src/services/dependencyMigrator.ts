@@ -57,7 +57,7 @@ import type { FhirResource, FhirResourceType } from '../types/fhir';
  * Default maximum resources per Transaction Bundle.
  * Per docs/FHIR_RULES.md: configurable, default 100.
  */
-export const DEFAULT_BUNDLE_SIZE = 200;
+export const DEFAULT_BUNDLE_SIZE = 100;
 
 // ---------------------------------------------------------------------------
 // Types
