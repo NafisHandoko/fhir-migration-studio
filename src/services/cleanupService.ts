@@ -10,7 +10,7 @@ export function belongsToMigrationTool(resource: FhirResource, initiatorComponen
   return !!resource.meta?.extension?.some(
     (ext) =>
       (ext.url === 'https://ehealth.co.id/terminology/initiator-component' ||
-       ext.url === 'initiator-component') &&
+        ext.url === 'initiator-component') &&
       ext.valueString === initiatorComponent
   );
 }
@@ -41,7 +41,10 @@ export async function scanCleanupResources(options: ScanOptions): Promise<Record
     });
 
     const matchedResources: FhirResource[] = [];
-    const queryParts = [`_count=250`];
+    const queryParts = [
+      `_count=250`,
+      // `initiator-component=${initiatorComponent}`
+    ];
     if (dateFrom) queryParts.push(`_created=ge${dateFrom}`);
     if (dateTo) queryParts.push(`_created=le${dateTo}`);
     const path = `/${rt}?${queryParts.join('&')}`;
@@ -199,7 +202,7 @@ export async function executeCleanup(options: CleanupOptions): Promise<void> {
             const entry = responseEntries[entryIdx];
             const statusStr = entry.response?.status ?? '500';
             const code = parseInt(statusStr.split(' ')[0], 10);
-            
+
             if (code >= 200 && code < 300) {
               bundleSuccess++;
             } else {
