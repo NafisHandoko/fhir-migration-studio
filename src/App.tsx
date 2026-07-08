@@ -8,6 +8,7 @@ import { ResourceMapping } from './pages/ResourceMapping';
 import { FHIRExplorer } from './pages/FHIRExplorer';
 import { Logs } from './pages/Logs';
 import { Settings } from './pages/Settings';
+import { Cleanup } from './pages/Cleanup';
 import './index.css';
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
         <Routes>
           <Route path="/"          element={<Dashboard />} />
           <Route path="/migrate"   element={<DirectMigration />} />
+          <Route path="/cleanup"   element={<Cleanup />} />
           <Route path="/export"    element={<ExportNDJSON />} />
           <Route path="/import"    element={<ImportNDJSON />} />
           <Route path="/mapping"   element={<ResourceMapping />} />

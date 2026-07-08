@@ -20,20 +20,19 @@
  */
 
 import type { Bundle, BundleEntry, FhirResource } from '../types/fhir';
+import { useSettingsStore } from '../store/settingsStore';
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants / Settings
 // ---------------------------------------------------------------------------
 
 /**
- * Maximum request body size for FHIR Transaction Bundles (7 MB).
- * Provides a 1 MB margin below the target ingress body size limit of 8 MB.
+ * @deprecated Use useSettingsStore to get dynamic bundle limits.
  */
 export const MAX_REQUEST_SIZE_BYTES = 3 * 1024 * 1024;
 
 /**
- * Maximum number of resources allowed per Transaction Bundle.
- * This helps prevent Gateway Timeout (504) on the server side when processing too many resources at once.
+ * @deprecated Use useSettingsStore to get dynamic bundle limits.
  */
 export const MAX_BUNDLE_RESOURCE_COUNT = 100;
 
@@ -102,33 +101,75 @@ export function buildTransactionBundle(resources: FhirResource[]): Bundle {
   return { resourceType: 'Bundle', type: 'transaction', entry: entries };
 }
 
-/**
- * Split a large list of resources into multiple Transaction Bundles.
- */
-export function buildTransactionBundles(
-  resources: FhirResource[],
-): Bundle[] {
-  const bundles: Bundle[] = [];
-  let currentBatch: FhirResource[] = [];
+export interface PreparedEntry {
+  entry: BundleEntry;
+  originalRef?: string;
+}
 
-  for (const resource of resources) {
-    const candidateBatch = [...currentBatch, resource];
-    const candidateBundle = buildTransactionBundle(candidateBatch);
+/**
+ * Split prepared entries into transaction bundles using global settings limits.
+ */
+export function splitPreparedEntries(prepared: PreparedEntry[]): { bundle: Bundle; originalRefs: string[] }[] {
+  const settings = useSettingsStore.getState();
+  const maxCount = settings.maxBundleResourceCount;
+  const maxSize = settings.maxBundleRequestSizeMb * 1024 * 1024;
+
+  const results: { bundle: Bundle; originalRefs: string[] }[] = [];
+  let currentBatch: PreparedEntry[] = [];
+
+  for (const item of prepared) {
+    const candidateBatch = [...currentBatch, item];
+    const candidateBundle: Bundle = {
+      resourceType: 'Bundle',
+      type: 'transaction',
+      entry: candidateBatch.map(x => x.entry),
+    };
     const size = calculateSerializedSize(candidateBundle);
 
-    if (currentBatch.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatch.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
-      bundles.push(buildTransactionBundle(currentBatch));
-      currentBatch = [resource];
+    if (currentBatch.length > 0 && (size > maxSize || currentBatch.length >= maxCount)) {
+      results.push({
+        bundle: {
+          resourceType: 'Bundle',
+          type: 'transaction',
+          entry: currentBatch.map(x => x.entry),
+        },
+        originalRefs: currentBatch.map(x => x.originalRef).filter((ref): ref is string => ref !== undefined),
+      });
+      currentBatch = [item];
     } else {
       currentBatch = candidateBatch;
     }
   }
 
   if (currentBatch.length > 0) {
-    bundles.push(buildTransactionBundle(currentBatch));
+    results.push({
+      bundle: {
+        resourceType: 'Bundle',
+        type: 'transaction',
+        entry: currentBatch.map(x => x.entry),
+      },
+      originalRefs: currentBatch.map(x => x.originalRef).filter((ref): ref is string => ref !== undefined),
+    });
   }
 
-  return bundles;
+  return results;
+}
+
+/**
+ * Split raw bundle entries into transaction bundles using global settings limits.
+ */
+export function splitBundleEntries(entries: BundleEntry[]): Bundle[] {
+  return splitPreparedEntries(entries.map(entry => ({ entry }))).map(res => res.bundle);
+}
+
+/**
+ * Split a large list of resources into multiple Transaction Bundles.
+ */
+export function buildTransactionBundles(
+  resources: FhirResource[],
+): Bundle[] {
+  const bundle = buildTransactionBundle(resources);
+  return splitBundleEntries(bundle.entry ?? []);
 }
 
 // ---------------------------------------------------------------------------

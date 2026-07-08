@@ -30,7 +30,8 @@
  */
 
 import { downloadResourceType } from './downloader';
-import { buildResourceTypeBundle, calculateSerializedSize, MAX_REQUEST_SIZE_BYTES, MAX_BUNDLE_RESOURCE_COUNT } from './bundleBuilder';
+import { buildResourceTypeBundle, splitPreparedEntries, splitBundleEntries } from './bundleBuilder';
+import type { PreparedEntry } from './bundleBuilder';
 import { rewriteResourceRefs } from './referenceRewriter';
 import { uploadSingleBundle } from './uploader';
 import {
@@ -310,36 +311,29 @@ async function uploadResourceTypeBatches(
   stripFields: string[] = [],
 ): Promise<MigrationCheckpoint> {
   if (resources.length === 0) return checkpoint;
+  void bundleSize;
 
   let totalUploaded = 0;
   let totalFailed = 0;
-  let nextResourceIndex = 0;
-  let batchIndex = 0;
 
-  while (nextResourceIndex < resources.length) {
+  // Prepare all entries with their original references first
+  const preparedEntries: PreparedEntry[] = resources.map((resource) => {
+    const rewritten = rewriteResourceRefs(resource, mappingService.getMap());
+    const { bundle, originalRefs } = buildResourceTypeBundle([rewritten], stripFields);
+    return {
+      entry: bundle.entry![0],
+      originalRef: originalRefs[0],
+    };
+  });
+
+  // Use the shared bundle splitting algorithm
+  const batches = splitPreparedEntries(preparedEntries);
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     if (!(await checkStatus())) return checkpoint;
 
-    const currentBatchResources: FhirResource[] = [];
-
-    while (nextResourceIndex < resources.length) {
-      const resource = resources[nextResourceIndex];
-      // Rewrite references based on current mapping state (which is updated after each batch upload)
-      const rewritten = rewriteResourceRefs(resource, mappingService.getMap());
-
-      const candidateBatch = [...currentBatchResources, rewritten];
-      const { bundle } = buildResourceTypeBundle(candidateBatch, stripFields);
-      const size = calculateSerializedSize(bundle);
-
-      if (currentBatchResources.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchResources.length >= bundleSize)) {
-        break;
-      }
-
-      currentBatchResources.push(rewritten);
-      nextResourceIndex++;
-    }
-
-    const { bundle, originalRefs } = buildResourceTypeBundle(currentBatchResources, stripFields);
-    const currentBatchSize = currentBatchResources.length;
+    const { bundle, originalRefs } = batches[batchIndex];
+    const currentBatchSize = bundle.entry?.length ?? 0;
 
     log({
       level: 'info',
@@ -400,11 +394,7 @@ async function uploadResourceTypeBatches(
         resourceType,
         jobId,
       });
-      // Bundle-level error: log and continue with next bundle (per FHIR_RULES.md §Retry Strategy:
-      // each bundle is independently retryable — orchestrator may retry later via resume)
     }
-
-    batchIndex++;
   }
 
   return checkpoint;
@@ -506,43 +496,14 @@ async function restorePatientLinks(
       jobId,
     });
   } else {
-    let nextEntryIndex = 0;
-    let batchIndex = 0;
-
-    while (nextEntryIndex < entries.length) {
-      const currentBatchEntries: typeof entries = [];
-
-      while (nextEntryIndex < entries.length) {
-        const entry = entries[nextEntryIndex];
-        const candidateEntries = [...currentBatchEntries, entry];
-
-        const patchBundle = {
-          resourceType: 'Bundle' as const,
-          type: 'transaction' as const,
-          entry: candidateEntries,
-        };
-
-        const size = calculateSerializedSize(patchBundle);
-
-        if (currentBatchEntries.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchEntries.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
-          break;
-        }
-
-        currentBatchEntries.push(entry);
-        nextEntryIndex++;
-      }
-
-      const patchBundle = {
-        resourceType: 'Bundle' as const,
-        type: 'transaction' as const,
-        entry: currentBatchEntries,
-      };
-
+    const batches = splitBundleEntries(entries);
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const patchBundle = batches[batchIndex];
       try {
         await fhirClient.post(target, '/', patchBundle);
         log({
           level: 'success',
-          message: `[Migration] Restored link.other for batch ${batchIndex + 1} (${currentBatchEntries.length} Patients)`,
+          message: `[Migration] Restored link.other for batch ${batchIndex + 1} (${patchBundle.entry?.length ?? 0} Patients)`,
           resourceType: 'Patient',
           jobId,
         });
@@ -555,8 +516,6 @@ async function restorePatientLinks(
           jobId,
         });
       }
-
-      batchIndex++;
     }
   }
 
@@ -658,43 +617,14 @@ async function restoreCompositionRelatesTo(
       jobId,
     });
   } else {
-    let nextEntryIndex = 0;
-    let batchIndex = 0;
-
-    while (nextEntryIndex < entries.length) {
-      const currentBatchEntries: typeof entries = [];
-
-      while (nextEntryIndex < entries.length) {
-        const entry = entries[nextEntryIndex];
-        const candidateEntries = [...currentBatchEntries, entry];
-
-        const patchBundle = {
-          resourceType: 'Bundle' as const,
-          type: 'transaction' as const,
-          entry: candidateEntries,
-        };
-
-        const size = calculateSerializedSize(patchBundle);
-
-        if (currentBatchEntries.length > 0 && (size > MAX_REQUEST_SIZE_BYTES || currentBatchEntries.length >= MAX_BUNDLE_RESOURCE_COUNT)) {
-          break;
-        }
-
-        currentBatchEntries.push(entry);
-        nextEntryIndex++;
-      }
-
-      const patchBundle = {
-        resourceType: 'Bundle' as const,
-        type: 'transaction' as const,
-        entry: currentBatchEntries,
-      };
-
+    const batches = splitBundleEntries(entries);
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const patchBundle = batches[batchIndex];
       try {
         await fhirClient.post(target, '/', patchBundle);
         log({
           level: 'success',
-          message: `[Migration] Restored relatesTo for batch ${batchIndex + 1} (${currentBatchEntries.length} Compositions)`,
+          message: `[Migration] Restored relatesTo for batch ${batchIndex + 1} (${patchBundle.entry?.length ?? 0} Compositions)`,
           resourceType: 'Composition',
           jobId,
         });
@@ -707,8 +637,6 @@ async function restoreCompositionRelatesTo(
           jobId,
         });
       }
-
-      batchIndex++;
     }
   }
 

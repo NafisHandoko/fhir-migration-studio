@@ -9,6 +9,7 @@ import {
   FileText,
   Settings,
   Activity,
+  Trash2,
 } from 'lucide-react';
 
 interface NavItemDef {
@@ -21,6 +22,7 @@ interface NavItemDef {
 const navItems: NavItemDef[] = [
   { to: '/',              icon: <LayoutDashboard size={16} />, label: 'Dashboard' },
   { to: '/migrate',       icon: <ArrowRightLeft size={16} />,  label: 'Direct Migration', badge: 'NEW' },
+  { to: '/cleanup',       icon: <Trash2 size={16} />,          label: 'Resource Cleanup' },
   { to: '/export',        icon: <Download size={16} />,        label: 'Export to NDJSON' },
   { to: '/import',        icon: <Upload size={16} />,          label: 'Import from NDJSON' },
   { to: '/mapping',       icon: <GitCompare size={16} />,      label: 'Mapping' },
