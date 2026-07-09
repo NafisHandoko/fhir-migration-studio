@@ -1,28 +1,31 @@
-# FHIR Rules
-
 # Goal
 
-Refactor the FHIR migration process to avoid HTTP 413 (Content Too Large) while preserving transactional integrity.
+Refactor the FHIR migration process to avoid HTTP 413 (Content Too Large) while making the migration easier to monitor, resume, and retry.
 
-The current implementation builds one massive FHIR Transaction Bundle (~15,000 resources), which exceeds the server request size limit.
+The current implementation builds one massive Transaction Bundle (~15,000 resources). This must be replaced with a dependency-driven migration pipeline that migrates resources by resource type in small Transaction Bundles.
 
-The new implementation should split the migration into multiple smaller Transaction Bundles without breaking any FHIR references.
+The implementation must remain fully compatible with FHIR Transaction Bundles.
 
 ---
 
 # Current Architecture
 
-The destination server already contains and maps:
+The destination server already contains:
 
 * Practitioner
 * Location
 * HealthcareService
 * Organization
 
+Mappings for these resources already exist.
+
 The migration imports:
 
 * Patient
 * Coverage
+* Schedule
+* Slot
+* Questionnaire
 * Appointment
 * Encounter
 * Composition
@@ -36,9 +39,6 @@ The migration imports:
 * ProcedureRequest
 * Consent
 * AuditEvent
-* Questionnaire
-* Schedule
-* Slot
 
 ---
 
@@ -49,8 +49,27 @@ The migration imports:
 A Patient may have:
 
 * one or more Coverages
-* multiple Appointments
-* links to other Patient resources via `Patient.link.other`
+* many Appointments
+* references to another Patient via `Patient.link.other`
+
+## Coverage
+
+References:
+
+* Patient
+* Organization
+
+## Schedule
+
+References:
+
+* HealthcareService
+
+## Slot
+
+References:
+
+* Schedule
 
 ## Appointment
 
@@ -61,8 +80,6 @@ References:
 * Slot
 * HealthcareService
 
-One Appointment may produce one or more Encounters.
-
 ## Encounter
 
 References:
@@ -71,7 +88,7 @@ References:
 * Patient
 * Condition
 
-Each Encounter produces exactly one Composition.
+One Encounter may produce one or more Compositions.
 
 ## Composition
 
@@ -91,121 +108,115 @@ References:
 
 ## Other Resources
 
-MedicationDispense references MedicationRequest.
+Condition
 
-Clinical resources (Condition, Observation, Procedure, MedicationRequest, etc.) belong only to a single Composition.
+* references Patient
+* Practitioner
 
-Clinical resources never reference clinical resources belonging to another patient.
+Observation
 
-The only cross-patient relationship is `Patient.link.other`.
+* references Patient
+* Practitioner
+
+AllergyIntolerance
+
+* references Patient
+* Practitioner
+
+ClinicalImpression
+
+* references Patient
+* Condition
+
+MedicationRequest
+
+* references Patient
+* Practitioner
+
+MedicationDispense
+
+* references Patient
+* Practitioner
+* MedicationRequest
+
+Procedure
+
+* references Patient
+* Practitioner
+
+ProcedureRequest
+
+* references Patient
+* Practitioner
+
+Consent
+
+* references
+
+  * Location
+  * Appointment
+  * Patient
+  * Practitioner
+  * Procedure
+
+AuditEvent
+
+* references
+
+  * Patient
+  * Practitioner
+
+Questionnaire
+
+* no references
 
 ---
 
-# Migration Strategy
+# New Migration Strategy
 
 Do NOT build one giant Transaction Bundle.
 
-Instead, split the migration into multiple small Transaction Bundles.
+Instead, migrate resources by dependency order.
+
+Each resource type should be migrated completely before moving to the next resource type.
+
+Each Transaction Bundle should contain a configurable maximum number of resources (default: 100).
 
 ---
 
-# Phase 1 — Shared Resources
+# Dependency Graph
 
-Create shared resources first.
+The migration order must respect resource dependencies.
 
-This includes:
+Implement the dependency graph as configuration rather than hardcoded business logic whenever possible.
 
-* Patient
-* Coverage
-* Schedule
-* Slot
-* Questionnaire
+Current dependency order:
 
-Use Transaction Bundles.
-
-Bundle size must be configurable (for example 100–500 resources).
-
-After each successful Transaction:
-
-Store
-
-Old Resource ID
+Questionnaire
 
 ↓
 
-New Resource ID
-
-Example
-
-Patient/100
+Patient
 
 ↓
 
-Patient/987
+Coverage
 
-This mapping will be used later to rewrite references.
+↓
 
----
+Schedule
 
-# Patient.link.other Handling
+↓
 
-Because Patient resources may reference other Patient resources, migrate them in two steps.
+Slot
 
-Step 1
-
-Create every Patient without `Patient.link.other`.
-
-Step 2
-
-After every Patient has been created and all Patient ID mappings are available,
-
-update each Patient and restore `Patient.link.other` using the mapped destination Patient IDs.
-
-Do NOT force every related Patient into the same Transaction Bundle.
-
----
-
-# Phase 2 — Clinical Episode Transactions
-
-Instead of grouping resources by resource type, group them by clinical episode.
-
-One Appointment should produce one or more small Transaction Bundles.
-
-Each Transaction Bundle should contain resources belonging to one Encounter.
-
-Example:
-
-* Appointment (only if not yet created)
-* Encounter
-* Composition
-* Condition
-* Observation
-* AllergyIntolerance
-* ClinicalImpression
-* Procedure
-* ProcedureRequest
-* MedicationRequest
-* MedicationDispense
-* Consent (if present)
-* AuditEvent (if present)
-
-The objective is to keep each Transaction Bundle small while preserving atomicity for one clinical episode.
-
----
-
-# UUID Strategy
-
-Continue using `urn:uuid`.
-
-Do NOT remove UUID references.
-
-However, UUIDs should only exist inside a single Transaction Bundle.
-
-Resources created together inside one Transaction should reference each other using `urn:uuid`.
-
-Examples:
+↓
 
 Appointment
+
+↓
+
+Condition
 
 ↓
 
@@ -213,64 +224,197 @@ Encounter
 
 ↓
 
+Observation
+
+↓
+
+AllergyIntolerance
+
+↓
+
+Procedure
+
+↓
+
+ProcedureRequest
+
+↓
+
+MedicationRequest
+
+↓
+
+MedicationDispense
+
+↓
+
+ClinicalImpression
+
+↓
+
 Composition
 
 ↓
 
-Observation
+Consent
 
-should continue using UUID references.
+↓
 
-UUIDs must never be expected to work across multiple Transaction Bundles.
+AuditEvent
+
+The implementation should make it easy to insert additional resource types in the future.
+
+---
+
+# Transaction Bundles
+
+Continue using FHIR Transaction Bundles.
+
+Each bundle should only contain resources of a single resource type.
+
+Example:
+
+Bundle #1
+
+100 Patient
+
+Bundle #2
+
+100 Patient
+
+...
+
+Bundle #120
+
+100 Patient
+
+Then continue with Coverage.
+
+Do NOT mix different resource types inside the same Transaction Bundle.
+
+---
+
+# Resource Mapping
+
+The destination server generates new logical IDs.
+
+Never assume IDs remain the same.
+
+Implement a generic Resource Mapping Service.
+
+Example API
+
+save(resourceType, oldId, newId)
+
+get(resourceType, oldId)
+
+exists(resourceType, oldId)
+
+The mapping service must work for every resource type.
+
+---
+
+# Patient.link.other
+
+Patient resources may reference other Patient resources.
+
+Handle this using two migration stages.
+
+Stage 1
+
+Create all Patient resources without `Patient.link.other`.
+
+Collect every Patient ID mapping.
+
+Stage 2
+
+Update Patient resources and restore `Patient.link.other` using mapped Patient IDs.
 
 ---
 
 # Reference Rewriting
 
-Before creating each Transaction Bundle:
+Before a resource is added into a Transaction Bundle,
 
-Rewrite every reference that points to an already migrated shared resource.
+rewrite every reference using the mapping service.
 
 Examples:
 
-Patient
+* Patient
+* Appointment
+* Encounter
+* MedicationRequest
+* Schedule
+* Slot
+* Practitioner
+* HealthcareService
+* Location
+* Organization
 
-Practitioner
+must all be rewritten using destination IDs.
 
-Location
-
-HealthcareService
-
-Organization
-
-Schedule
-
-Slot
-
-Coverage (if applicable)
-
-must all be rewritten using the destination IDs stored in the mapping table.
-
-Do NOT rewrite references between resources that are being created inside the same Transaction Bundle.
-
-Those references should continue using `urn:uuid`.
+No reference should still point to an old server ID after migration.
 
 ---
 
-# Architecture Requirements
+# Progress Tracking
 
-Separate responsibilities into independent components.
+The migration should expose progress by resource type.
+
+Example:
+
+Patient
+
+11,500 / 12,000
+
+Coverage
+
+1,800 / 2,000
+
+Appointment
+
+7,200 / 8,100
+
+Encounter
+
+7,100 / 8,100
+
+Composition
+
+6,950 / 8,100
+
+---
+
+# Retry Strategy
+
+Every Transaction Bundle should be independently retryable.
+
+If one bundle fails,
+
+only that bundle should be retried.
+
+Successfully migrated bundles should never be migrated again.
+
+---
+
+# Architecture
+
+Refactor the implementation into independent components.
 
 Suggested components:
 
 * Migration Orchestrator
-* Shared Resource Migrator
-* Clinical Episode Builder
+* Dependency Graph
+* Resource Loader
 * Transaction Bundle Builder
 * Resource Mapping Service
 * Reference Rewriter
+* Progress Tracker
+* Retry Manager
 
-The implementation should avoid duplicated reference rewriting logic.
+Avoid duplicated logic.
+
+The migration pipeline should be generic enough to support additional FHIR resource types with minimal code changes.
 
 ---
 
@@ -278,20 +422,24 @@ The implementation should avoid duplicated reference rewriting logic.
 
 Bundle size must be configurable.
 
-The implementation should allow changing the maximum number of resources per Transaction Bundle without changing business logic.
+Migration order should be configurable.
+
+Retry policy should be configurable.
+
+Logging verbosity should be configurable.
 
 ---
 
 # Expected Result
 
-The final solution should:
+The final implementation should:
 
-* eliminate HTTP 413 errors
-* keep using Transaction Bundles
-* preserve atomicity within each clinical episode
-* preserve all FHIR references correctly
-* continue using `urn:uuid` where appropriate
-* rewrite only references that cross Transaction Bundle boundaries
-* support Patient self-references via `Patient.link.other`
-* make retrying failed batches easy
+* eliminate HTTP 413
+* continue using Transaction Bundles
+* migrate resources according to dependency order
+* rewrite every reference correctly
+* maintain a generic old ID → new ID mapping for every resource type
+* support Patient self-references
+* support progress tracking per resource type
+* support retry per bundle
 * keep the implementation modular, maintainable, and extensible

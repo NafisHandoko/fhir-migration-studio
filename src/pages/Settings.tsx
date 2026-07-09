@@ -6,6 +6,7 @@ import { Input } from '../components/ui/Input';
 import { Card } from '../components/ui/Card';
 import { ServerCard } from '../components/server/ServerCard';
 import { useServerStore } from '../store/serverStore';
+import { useSettingsStore } from '../store/settingsStore';
 import type { ServerConfig } from '../types/server';
 
 interface ServerFormProps {
@@ -102,6 +103,59 @@ function ServerForm({ title, config, onSave }: ServerFormProps) {
   );
 }
 
+function BundleSettingsForm() {
+  const { maxBundleResourceCount, maxBundleRequestSizeMb, setMaxBundleResourceCount, setMaxBundleRequestSizeMb } = useSettingsStore();
+  const [count, setCount] = useState(maxBundleResourceCount);
+  const [size, setSize] = useState(maxBundleRequestSizeMb);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = () => {
+    setMaxBundleResourceCount(Number(count));
+    setMaxBundleRequestSizeMb(Number(size));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>Transaction Bundle Settings</div>
+        <Button
+          variant={saved ? 'success' : 'primary'}
+          size="sm"
+          icon={<Save size={13} />}
+          onClick={handleSave}
+        >
+          {saved ? 'Saved!' : 'Save'}
+        </Button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Input
+          label="Maximum Resources per Transaction Bundle"
+          type="number"
+          min={1}
+          max={10000}
+          value={count}
+          onChange={(e) => setCount(Number(e.target.value))}
+          hint="Default is 100. Lower values prevent server gateway timeouts."
+        />
+
+        <Input
+          label="Maximum Transaction Bundle Request Size (MB)"
+          type="number"
+          step="0.1"
+          min={0.1}
+          max={100}
+          value={size}
+          onChange={(e) => setSize(Number(e.target.value))}
+          hint="Default is 3 MB. Lower values prevent HTTP 413 (Payload Too Large) errors."
+        />
+      </div>
+    </Card>
+  );
+}
+
 export function Settings() {
   const { source, target, setSource, setTarget, resetSourceStatus, resetTargetStatus } = useServerStore();
 
@@ -141,6 +195,8 @@ export function Settings() {
           <ServerCard role="target" />
         </div>
       </div>
+      
+      <BundleSettingsForm />
 
       {/* Info */}
       <Card size="sm">

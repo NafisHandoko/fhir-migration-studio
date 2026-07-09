@@ -1,22 +1,62 @@
 /**
  * Resource Mapping Service — stores old-to-new FHIR resource ID mappings.
  *
- * After each Phase 1 bundle is successfully uploaded, the FHIR server returns
- * a transaction-response Bundle whose entry[].response.location field contains
+ * After each bundle is successfully uploaded, the FHIR server returns a
+ * transaction-response Bundle whose entry[].response.location field contains
  * the newly assigned resource URL (e.g. "Patient/987/_history/1").
  *
  * ResourceMappingService stores:
  *   "Patient/100" → "Patient/987"
  *
- * Phase 2 then uses these mappings to rewrite cross-bundle references before
- * building each clinical episode Transaction Bundle.
+ * The dependency migrator uses these mappings to rewrite cross-bundle references
+ * before building each Transaction Bundle.
  *
- * Includes the user-defined manual mapping rules (Practitioner, Location,
+ * Also includes the user-defined manual mapping rules (Practitioner, Location,
  * HealthcareService, Organization) that are loaded at the start of migration.
+ *
+ * Per docs/FHIR_RULES.md §Resource Mapping Service:
+ *   save(resourceType, oldId, newId)
+ *   get(resourceType, oldId)
+ *   exists(resourceType, oldId)
  */
 
 export class ResourceMappingService {
   private readonly _map = new Map<string, string>();
+
+  // ---------------------------------------------------------------------------
+  // High-level typed API (per FHIR_RULES.md spec)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Save a mapping for a specific resource type.
+   * @example save("Patient", "100", "987")
+   * → stored as "Patient/100" → "Patient/987"
+   */
+  save(resourceType: string, oldId: string, newId: string): void {
+    this._map.set(`${resourceType}/${oldId}`, `${resourceType}/${newId}`);
+  }
+
+  /**
+   * Retrieve the new destination ID for a resource, or undefined if not mapped.
+   * @example get("Patient", "100") → "987"  (or undefined)
+   */
+  getById(resourceType: string, oldId: string): string | undefined {
+    const newRef = this._map.get(`${resourceType}/${oldId}`);
+    if (!newRef) return undefined;
+    return newRef.split('/')[1];
+  }
+
+  /**
+   * Returns true if the resource has a known mapping.
+   * @example exists("Patient", "100") → true/false
+   */
+  exists(resourceType: string, oldId: string): boolean {
+    return this._map.has(`${resourceType}/${oldId}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Low-level ref-string API (backward-compatible)
+  // ---------------------------------------------------------------------------
 
   /**
    * Store a mapping from an old resource reference to its new target reference.
@@ -30,6 +70,7 @@ export class ResourceMappingService {
 
   /**
    * Retrieve the mapped destination reference, or undefined if not mapped.
+   * @example get("Patient/100") → "Patient/987"
    */
   get(oldRef: string): string | undefined {
     return this._map.get(oldRef);
