@@ -177,11 +177,3 @@ fhir-migration-studio/
 ## 📝 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
----
-
-## 👤 Author
-
-**Nafis Handoko**
-* GitHub: [@NafisHandoko](https://github.com/NafisHandoko)
-* Website: [NafisHandoko Portfolio](https://nafishandoko.my.id)
